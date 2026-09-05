@@ -13,6 +13,11 @@ import "Model.js" as Model
 // bar widget (hostWidget.view), so the bar label and this panel never
 // disagree. When the widget is offline the panel stays calm: it marks the
 // state and keeps showing the last known address.
+//
+// MI-2 additions: the panel mirrors the bar's persisted address-change
+// tracker, so it can show the address family, the moment of the last change
+// and the short history of previous public IPs (with a calm empty state
+// before the first change ever happens).
 Panel {
   id: root
   moduleName: "io.github.shirak-semonian.myip"
@@ -47,6 +52,21 @@ Panel {
   readonly property string ispText: hasData ? (address.isp || address.org || "\u2014") : "\u2014"
   readonly property string asText: hasData ? (address.as || "\u2014") : "\u2014"
   readonly property string checkedText: root.view.at ? Model.formatTime(root.view.at) : "\u2014"
+
+  // MI-2: address-change tracker (mirrored from the bar widget root). The
+  // panel reads the same persisted tracker the bar feeds, so the history and
+  // the last-change time can never disagree with the notifications.
+  readonly property var tracker: hostWidget && hostWidget.tracker
+    ? hostWidget.tracker : Model.emptyTracker()
+  readonly property var history: Model.historyEntries(root.tracker)
+  readonly property bool hasHistory: root.history.length > 0
+  readonly property string familyText: hasData && address.ip
+    ? Model.familyOf(address.ip) : ""
+  // Last change time: the moment the current address became current. "never"
+  // until the first real change (a fresh baseline is not a change).
+  readonly property string changedText: !hasData ? "\u2014"
+    : (root.hasHistory && root.tracker.firstSeenAt > 0
+      ? Model.formatTime(root.tracker.firstSeenAt) : "never")
 
   property bool copied: false
   property bool copyFailed: false
@@ -104,9 +124,21 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
+      // The whole panel scrolls when the screen is short (history grows the
+      // content); the card keeps its fitted height and the column scrolls
+      // inside it instead of overflowing the popup edge.
+      Flickable {
+        id: panelScroll
+        anchors.fill: parent
+        contentWidth: content.width
+        contentHeight: content.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: contentHeight > height
+
       Column {
         id: content
-        width: parent ? parent.width : implicitWidth
+        width: panelScroll.width
         spacing: Style.space(12)
 
         PanelHero {
@@ -231,8 +263,80 @@ Panel {
             value: root.asText
           }
           InfoPair {
+            label: "Address family"
+            value: root.familyText !== "" ? root.familyText : "\u2014"
+            visible: root.hasData
+          }
+          InfoPair {
+            label: "Last change"
+            value: root.changedText
+          }
+          InfoPair {
             label: "Last checked"
             value: root.checkedText
+          }
+        }
+
+        // ---- address history (MI-2) --------------------------------------
+        PanelSeparator {
+          foreground: root.foreground
+          visible: root.hasData
+        }
+
+        PanelSectionHeader {
+          text: "Address history"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          visible: root.hasData
+        }
+
+        // Empty history is a calm, instructive state — not an empty column.
+        Text {
+          width: parent.width
+          text: "No changes yet \u2014 your previous public IPs will appear "
+            + "here after your address changes."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          visible: root.hasData && !root.hasHistory
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(2)
+          visible: root.hasData && root.hasHistory
+
+          Repeater {
+            model: root.history
+
+            delegate: Row {
+              width: content.width
+              spacing: Style.space(6)
+              height: Style.space(18)
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.countryCode
+                  ? Model.flagEmoji(modelData.countryCode) + "  " + modelData.ip
+                  : modelData.ip
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+                width: content.width - Style.space(70)
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: Model.formatTime(modelData.at)
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                horizontalAlignment: Text.AlignRight
+                width: Style.space(64)
+              }
+            }
           }
         }
 
@@ -262,6 +366,7 @@ Panel {
           visible: text !== ""
         }
       }
+    }
     }
   }
 

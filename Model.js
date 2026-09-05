@@ -56,6 +56,16 @@ var DEFAULT_REQUEST_TIMEOUT_SECONDS = 8;
 var MAX_RESPONSE_BYTES = 65536; // 64 KiB — curl --max-filesize + parser cap
 var OFFLINE_AFTER_CONSECUTIVE_FAILURES = 2;
 
+// MI-2: public-IP change tracking. The widget keeps the last known address
+// (plus a short history) in a tiny state file and notifies once per real
+// change. The first sighting is a silent baseline — a fresh install (or a
+// cleared state file) never rings.
+var STATE_FILE_VERSION = 1;
+var HISTORY_LIMIT = 6;          // previous addresses kept in the state file
+var CHANGE_GATE_TTL_SECONDS = 120; // dedupe window for twin bar instances
+var GLYPH = "\uf0ac"; // globe — shown as the notification glyph (Nerd Font)
+var MAX_IP_LENGTH = 45;         // longest legal IPv6 address
+
 // Curl exit codes that describe a reachability problem, with a calm,
 // human-readable description.
 var CURL_ERROR_TEXT = {
@@ -341,6 +351,260 @@ function tooltipText(view, pollIntervalSeconds) {
   return "MyIP \u2014 checking your public IP\u2026";
 }
 
+// ---------------------------------------------------------------------------
+// MI-2: address-change tracking, history + notifications (pure logic)
+// ---------------------------------------------------------------------------
+//
+// Tracker state (persisted as JSON under $XDG_STATE_HOME/myip/state.json):
+//   { version, lastIp, country, countryCode, firstSeenAt, history[] }
+//     lastIp       — the address currently believed to be public
+//     country/…    — geo of that address (for rendering + notification)
+//     firstSeenAt  — ms epoch when lastIp became current (baseline time on a
+//                    fresh start, otherwise the moment of the last change)
+//     history      — previous addresses, newest first, each capped to the
+//                    HISTORY_LIMIT newest entries:
+//                    { ip, country, countryCode, at }
+//                    `at` = ms epoch when that address was replaced.
+//
+// Baseline rule (the widget never rings on startup):
+//   * the very first observation with no persisted lastIp is recorded as the
+//     baseline and emits no event — a state reset + start stays silent;
+//   * a later observation of the SAME address is always a no-op;
+//   * only a genuinely different address emits one { kind: "changed" } event.
+// Because lastIp is persisted, a shell restart cannot re-announce an
+// unchanged address; an address that really changed while the widget was
+// off still notifies once (the change is real, not a false start alert).
+
+function emptyTracker() {
+  return {
+    version: STATE_FILE_VERSION,
+    lastIp: "",
+    country: "",
+    countryCode: "",
+    firstSeenAt: 0,
+    history: []
+  };
+}
+
+// Normalized copy of a tracker with only the persisted fields (history capped).
+function cleanTracker(state) {
+  var st = emptyTracker();
+  if (!state || typeof state !== "object") return st;
+  st.lastIp = stringField(state.lastIp);
+  st.country = stringField(state.country);
+  st.countryCode = stringField(state.countryCode).toUpperCase();
+  var at = Number(state.firstSeenAt);
+  st.firstSeenAt = isFinite(at) && at > 0 ? at : 0;
+  if (Array.isArray(state.history)) {
+    var out = [];
+    for (var i = 0; i < state.history.length && out.length < HISTORY_LIMIT; i++) {
+      var h = state.history[i];
+      if (!h || typeof h !== "object") continue;
+      var ip = stringField(h.ip);
+      if (!isLikelyIp(ip)) continue;
+      var ts = Number(h.at);
+      if (!isFinite(ts) || ts <= 0) continue;
+      out.push({
+        ip: ip,
+        country: stringField(h.country),
+        countryCode: stringField(h.countryCode).toUpperCase(),
+        at: ts
+      });
+    }
+    st.history = out;
+  }
+  return st;
+}
+
+// Loose sanity check for an address-shaped string (IPv4 dotted quad or
+// IPv6-ish with colons and hex digits). This is display/persistence hygiene,
+// not a security boundary — the file is local and user-writable.
+function isLikelyIp(value) {
+  if (typeof value !== "string") return false;
+  var v = value.trim();
+  if (v.length < 3 || v.length > MAX_IP_LENGTH) return false;
+  if (/^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(v)) return true;
+  if (v.indexOf(":") > 0 && /^[0-9a-fA-F:.%]+$/.test(v)) return true;
+  return false;
+}
+
+// "IPv4" | "IPv6" for an address string ("" when unknown).
+function familyOf(ip) {
+  if (!isLikelyIp(ip)) return "";
+  return ip.indexOf(":") > 0 ? "IPv6" : "IPv4";
+}
+
+function sameTracker(a, b) {
+  return trackerToText(a) === trackerToText(b);
+}
+
+// Serialize a tracker to the JSON that the state file stores.
+function trackerToText(state) {
+  var st = cleanTracker(state);
+  return JSON.stringify({
+    version: STATE_FILE_VERSION,
+    lastIp: st.lastIp,
+    country: st.country,
+    countryCode: st.countryCode,
+    firstSeenAt: st.firstSeenAt,
+    history: st.history
+  });
+}
+
+// Parse the state file back into a tracker. Anything unreadable degrades to
+// a fresh empty tracker (the next observation then becomes the silent
+// baseline) — a corrupt state file must never block the widget.
+function trackerFromText(text) {
+  if (typeof text !== "string" || text.trim() === "") return emptyTracker();
+  var obj = null;
+  try {
+    obj = JSON.parse(text);
+  } catch (error) {
+    return emptyTracker();
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return emptyTracker();
+  if (!isLikelyIp(obj.lastIp)) {
+    // A state file without a usable lastIp is as good as no state file.
+    return emptyTracker();
+  }
+  return cleanTracker(obj);
+}
+
+// True when the tracker holds a usable last-known address (the widget only
+// judges changes once a baseline exists).
+function trackerHasBaseline(state) {
+  return !!state && isLikelyIp(state.lastIp);
+}
+
+function historyEntries(state) {
+  return trackerHasBaseline(state) && Array.isArray(state.history)
+    ? state.history : [];
+}
+
+function historyCount(state) {
+  return historyEntries(state).length;
+}
+
+// Pure transition: feed one fresh observation (ip + optional geo at a ms
+// epoch) into the tracker. Returns
+//   { state, events: [ { kind: "changed", from, to, at } ] }
+// Baseline sightings and unchanged addresses produce no events.
+function trackObservation(state, obs) {
+  var st = cleanTracker(state);
+  if (!obs || typeof obs !== "object") return { state: st, events: [] };
+  var ip = stringField(obs.ip);
+  if (!isLikelyIp(ip)) return { state: st, events: [] };
+  var at = Number(obs.at);
+  if (!isFinite(at) || at <= 0) at = Date.now();
+  var country = stringField(obs.country);
+  var countryCode = stringField(obs.countryCode).toUpperCase();
+  var events = [];
+
+  if (st.lastIp === "") {
+    // First concrete observation = silent baseline.
+    st.lastIp = ip;
+    st.country = country;
+    st.countryCode = countryCode;
+    st.firstSeenAt = at;
+    return { state: st, events: events };
+  }
+  if (st.lastIp === ip) {
+    // Same address: never a change, nothing to record.
+    return { state: st, events: events };
+  }
+  // Real change: push the address that just stopped being current to the top
+  // of the history (at = the moment it was replaced), then remember the new
+  // address. One event per transition — a poll that re-observes the new
+  // address later is a no-op, so an unchanged address can never re-notify.
+  var oldIp = st.lastIp;
+  var oldCountry = st.country;
+  var oldCountryCode = st.countryCode;
+  var entry = {
+    ip: oldIp,
+    country: oldCountry,
+    countryCode: oldCountryCode,
+    at: at
+  };
+  var history = st.history.slice(0, HISTORY_LIMIT - 1);
+  history.unshift(entry);
+  st.lastIp = ip;
+  st.country = country;
+  st.countryCode = countryCode;
+  st.firstSeenAt = at;
+  st.history = history;
+  events.push({
+    kind: "changed",
+    from: { ip: oldIp, country: oldCountry, countryCode: oldCountryCode },
+    to: { ip: ip, country: country, countryCode: countryCode },
+    at: at
+  });
+  return { state: st, events: events };
+}
+
+// Human strings for one IP-change event (used by the widget to send one
+// Omarchy notification per event).
+function changeNotificationParts(event) {
+  if (!event || event.kind !== "changed") return {};
+  var fromIp = (event.from && event.from.ip) || "";
+  var toIp = (event.to && event.to.ip) || "";
+  if (!fromIp || !toIp) return {};
+  var body = "IP changed: " + fromIp + " \u2192 " + toIp;
+  if (event.to.countryCode) {
+    var flag = flagEmoji(event.to.countryCode);
+    var geo = event.to.country ? event.to.country : event.to.countryCode;
+    if (flag) body += " (" + geo + " " + flag + ")";
+    else body += " (" + geo + ")";
+  }
+  return {
+    summary: "MyIP \u2014 IP changed",
+    body: body,
+    urgency: "normal",
+    glyph: GLYPH
+  };
+}
+
+// Dedupe key for a change event. The new address is the identity: when the
+// address moves to X, twins that observe the same move share this key and
+// only the first may notify.
+function changeGateKey(event) {
+  if (!event || event.kind !== "changed") return "";
+  return "ip-change|" + String((event.to && event.to.ip) || "");
+}
+
+// argv: bash -c script name stateFile key ttlSeconds; prints "send" or
+// "skip". Atomic flock record of "{key} {unixSeconds}" so that when Omarchy
+// runs twin widget instances (one per monitor) only the first instance to
+// reach the gate sends the notification; flock failures degrade to "skip"
+// (no notification) — never to a duplicate.
+function notifGateCommandArgs(stateFile, key, ttlSeconds) {
+  var ttl = Number(ttlSeconds);
+  if (!isFinite(ttl) || ttl < 1) ttl = CHANGE_GATE_TTL_SECONDS;
+  var script = "f=$1; key=$2; ttl=$3;"
+    + " dir=$(dirname -- \"$f\"); mkdir -p -- \"$dir\" 2>/dev/null || { echo skip; exit 0; };"
+    + " lock=\"$f.lock\"; exec 9>\"$lock\" || { echo skip; exit 0; };"
+    + " flock 9 2>/dev/null || { echo skip; exit 0; };"
+    + " now=$(date +%s); prev=\"\"; prevts=0;"
+    + " if [ -f \"$f\" ]; then read -r prev prevts < \"$f\" 2>/dev/null || true; fi;"
+    + " if [ \"$prev\" = \"$key\" ] && [ -n \"$prevts\" ]"
+    + "   && [ \"$(( now - prevts ))\" -lt \"$ttl\" ]; then echo skip;"
+    + " else printf '%s %s\\n' \"$key\" \"$now\" > \"$f\"; echo send; fi";
+  return ["bash", "-c", script, "myip-notif-gate",
+    String(stateFile == null ? "" : stateFile), String(key == null ? "" : key), String(ttl)];
+}
+
+// argv for the atomic state-file write (mode 600 from the first byte via
+// umask 077; unique temp file + mv). The state file contains no secrets,
+// but it does hold the user's address history — keep it private.
+function writeFileCommandArgs(path, text) {
+  var f = String(path == null ? "" : path);
+  var t = String(text == null ? "" : text);
+  var script = "umask 077; f=$1; d=$(dirname -- \"$f\");"
+    + " mkdir -p -- \"$d\" 2>/dev/null || exit 1;"
+    + " tmp=\"$f.tmp.$$\"; printf '%s' \"$2\" > \"$tmp\" || exit 1;"
+    + " mv -f -- \"$tmp\" \"$f\" || exit 1;";
+  return ["bash", "-c", script, "myip-write-state", f, t];
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     PROVIDER_NAME: PROVIDER_NAME,
@@ -370,6 +634,26 @@ if (typeof module !== "undefined") {
     formatTime: formatTime,
     locationLine: locationLine,
     statusLine: statusLine,
-    tooltipText: tooltipText
+    tooltipText: tooltipText,
+    STATE_FILE_VERSION: STATE_FILE_VERSION,
+    HISTORY_LIMIT: HISTORY_LIMIT,
+    CHANGE_GATE_TTL_SECONDS: CHANGE_GATE_TTL_SECONDS,
+    GLYPH: GLYPH,
+    MAX_IP_LENGTH: MAX_IP_LENGTH,
+    emptyTracker: emptyTracker,
+    cleanTracker: cleanTracker,
+    isLikelyIp: isLikelyIp,
+    familyOf: familyOf,
+    sameTracker: sameTracker,
+    trackerToText: trackerToText,
+    trackerFromText: trackerFromText,
+    trackerHasBaseline: trackerHasBaseline,
+    historyEntries: historyEntries,
+    historyCount: historyCount,
+    trackObservation: trackObservation,
+    changeNotificationParts: changeNotificationParts,
+    changeGateKey: changeGateKey,
+    notifGateCommandArgs: notifGateCommandArgs,
+    writeFileCommandArgs: writeFileCommandArgs
   };
 }

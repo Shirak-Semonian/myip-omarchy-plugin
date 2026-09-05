@@ -129,4 +129,137 @@ const afterTick = M.reduce(okView, { type: "fetchStart" })
 eq(afterTick.status, "ok", "fetchStart leaves an ok state alone (no flicker)")
 eq(afterTick, beforeTick, "fetchStart is a no-op for ok")
 
+// =========================================================================
+// MI-2: address-change detection, history + notifications
+// =========================================================================
+
+// --- tracker basics -------------------------------------------------------
+const fresh = M.emptyTracker()
+eq(fresh.lastIp, "", "fresh tracker has no address")
+eq(fresh.history.length, 0, "fresh tracker has no history")
+
+// --- baseline: first observation never alerts -----------------------------
+let tr = M.emptyTracker()
+let res = M.trackObservation(tr, { ip: "203.0.113.7", country: "Example", countryCode: "ex", at: 1000 })
+eq(res.events.length, 0, "first observation is a silent baseline (no event)")
+eq(res.state.lastIp, "203.0.113.7", "baseline records the address")
+eq(res.state.countryCode, "EX", "baseline country code normalized")
+eq(res.state.firstSeenAt, 1000, "baseline records first-seen time")
+eq(res.state.history.length, 0, "baseline starts with empty history")
+ok(!M.trackerHasBaseline(M.emptyTracker()), "empty tracker has no baseline")
+ok(M.trackerHasBaseline(res.state), "tracker with an address has a baseline")
+
+// --- same address again: no event, no history -----------------------------
+res = M.trackObservation(res.state, { ip: "203.0.113.7", country: "Example", countryCode: "EX", at: 2000 })
+eq(res.events.length, 0, "unchanged address never alerts")
+eq(res.state.history.length, 0, "unchanged address adds no history")
+eq(res.state.firstSeenAt, 1000, "unchanged address keeps first-seen time")
+
+// --- real change: one event + history entry -------------------------------
+res = M.trackObservation(res.state, { ip: "198.51.100.9", country: "Test", countryCode: "ZZ", at: 3000 })
+eq(res.events.length, 1, "real change emits exactly one event")
+const ev = res.events[0]
+eq(ev.kind, "changed", "change event kind")
+eq(ev.from.ip, "203.0.113.7", "change from is the previous address")
+eq(ev.to.ip, "198.51.100.9", "change to is the new address")
+eq(ev.at, 3000, "change carries the observation time")
+eq(res.state.lastIp, "198.51.100.9", "state follows the new address")
+eq(res.state.firstSeenAt, 3000, "firstSeenAt moves to the change time")
+eq(res.state.history.length, 1, "history holds the replaced address")
+eq(res.state.history[0].ip, "203.0.113.7", "history entry is the old address")
+eq(res.state.history[0].at, 3000, "history entry time = when it was replaced")
+eq(M.historyCount(res.state), 1, "historyCount")
+
+// --- another change back: newest-first ordering ---------------------------
+res = M.trackObservation(res.state, { ip: "203.0.113.7", country: "Example", countryCode: "EX", at: 4000 })
+eq(res.events.length, 1, "change back also emits one event")
+eq(res.events[0].from.ip, "198.51.100.9", "change-back from")
+eq(res.state.history.length, 2, "two history entries")
+eq(res.state.history[0].ip, "198.51.100.9", "newest replacement first")
+eq(res.state.history[1].ip, "203.0.113.7", "older replacement second")
+
+// --- repeated observation of the same new address stays quiet -------------
+res = M.trackObservation(res.state, { ip: "203.0.113.7", country: "Example", countryCode: "EX", at: 5000 })
+eq(res.events.length, 0, "same address after change stays quiet (no repeat notify)")
+eq(res.state.history.length, 2, "no duplicate history on repeat observation")
+
+// --- history cap ----------------------------------------------------------
+let capped = M.emptyTracker()
+for (let i = 0; i < M.HISTORY_LIMIT + 3; i++) {
+  capped = M.trackObservation(capped, { ip: "192.0.2." + (i % 240), at: 6000 + i }).state
+}
+eq(capped.history.length, M.HISTORY_LIMIT, "history capped at HISTORY_LIMIT")
+eq(capped.history[0].ip, "192.0.2." + (M.HISTORY_LIMIT + 1) % 240, "oldest entries dropped, newest kept")
+
+// --- invalid observations are no-ops --------------------------------------
+const noIp = M.trackObservation(res.state, { ip: "", at: 7000 })
+eq(noIp.events.length, 0, "empty ip emits nothing")
+eq(noIp.state.lastIp, res.state.lastIp, "empty ip leaves state untouched")
+eq(M.trackObservation(res.state, null).state.lastIp, res.state.lastIp, "null observation leaves state untouched")
+const weird = M.trackObservation(res.state, { ip: "not-an-ip!", at: 7000 })
+eq(weird.events.length, 0, "non-address string emits nothing")
+
+// --- serialization round trip ---------------------------------------------
+const text = M.trackerToText(res.state)
+ok(text.startsWith("{") && text.includes("\"lastIp\":\"203.0.113.7\""), "serialized tracker contains lastIp")
+const parsed = M.trackerFromText(text)
+eq(parsed.lastIp, res.state.lastIp, "round-trip lastIp")
+eq(parsed.firstSeenAt, res.state.firstSeenAt, "round-trip firstSeenAt")
+eq(parsed.history.length, res.state.history.length, "round-trip history length")
+eq(M.trackerToText(parsed), text, "round-trip is stable JSON")
+ok(M.sameTracker(res.state, parsed), "sameTracker true for round-trip")
+
+// --- corrupt state file degrades to empty tracker -------------------------
+eq(M.trackerFromText("").lastIp, "", "empty file -> empty tracker")
+eq(M.trackerFromText("not json").lastIp, "", "garbage file -> empty tracker")
+eq(M.trackerFromText("[1,2]").lastIp, "", "array file -> empty tracker")
+eq(M.trackerFromText("{\"lastIp\":\"\"}").lastIp, "", "file without address -> empty tracker")
+eq(M.trackerFromText("{\"lastIp\":12345}").lastIp, "", "non-string address -> empty tracker")
+eq(M.trackerFromText(null).lastIp, "", "null file -> empty tracker")
+const tooLongIp = "203.0.113.7".padEnd(200, "x")
+eq(M.trackerFromText(JSON.stringify({ lastIp: tooLongIp })).lastIp, "", "oversized address rejected")
+
+// --- history entries survive serialization but stay capped -----------------
+const capText = M.trackerToText(capped)
+eq(M.trackerFromText(capText).history.length, M.HISTORY_LIMIT, "capped history round-trips")
+const overText = JSON.stringify({
+  lastIp: "203.0.113.7", firstSeenAt: 1,
+  history: Array.from({ length: 20 }, (_, i) => ({ ip: "198.51.100." + i, at: i + 1 }))
+})
+eq(M.trackerFromText(overText).history.length, M.HISTORY_LIMIT, "oversized history file is capped on read")
+
+// --- notification copy -----------------------------------------------------
+const parts = M.changeNotificationParts(ev)
+eq(parts.summary, "MyIP \u2014 IP changed", "notification summary")
+ok(parts.body.includes("IP changed: 203.0.113.7 \u2192 198.51.100.9"), "notification body old -> new")
+ok(parts.body.includes("(Test") && parts.body.includes(")"), "notification mentions the new country when known")
+eq(parts.urgency, "normal", "change alert is normal urgency (calm but visible)")
+const nlParts = M.changeNotificationParts({ kind: "changed", from: { ip: "203.0.113.7" }, to: { ip: "203.0.113.7", country: "The Netherlands", countryCode: "NL" } })
+ok(nlParts.body.includes("The Netherlands \uD83C\uDDF3\uD83C\uDDF1"), "notification shows flag with the new country")
+eq(M.changeNotificationParts({ kind: "other" }).summary, undefined, "non-change event has no notification")
+const noCountryEvent = { kind: "changed", from: { ip: "203.0.113.7" }, to: { ip: "198.51.100.9" } }
+eq(M.changeNotificationParts(noCountryEvent).body, "IP changed: 203.0.113.7 \u2192 198.51.100.9", "no country -> plain body")
+
+// --- gate key + command ----------------------------------------------------
+eq(M.changeGateKey(ev), "ip-change|198.51.100.9", "gate key identifies the new address")
+const gateArgs = M.notifGateCommandArgs("/tmp/notif.gate", "ip-change|198.51.100.9", 25)
+eq(gateArgs[0], "bash", "gate uses bash")
+has(gateArgs.join(" "), "flock", "gate uses flock")
+has(gateArgs.join(" "), "myip-notif-gate", "gate argv name")
+ok(gateArgs.join(" ").includes("25"), "ttl passed to gate")
+
+// --- family + write helper -------------------------------------------------
+eq(M.familyOf("203.0.113.7"), "IPv4", "dot address is IPv4")
+eq(M.familyOf("2001:db8::1"), "IPv6", "colon address is IPv6")
+eq(M.familyOf(""), "", "empty -> no family")
+eq(M.isLikelyIp("203.0.113.7"), true, "ipv4 accepted")
+eq(M.isLikelyIp("2001:db8::1"), true, "ipv6 accepted")
+eq(M.isLikelyIp("203.0.113.7 "), true, "trailing space tolerated")
+eq(M.isLikelyIp("80.60.128"), false, "short ip rejected")
+const wArgs = M.writeFileCommandArgs("/tmp/x/state.json", "{}")
+has(wArgs.join(" "), "mkdir -p", "write helper creates the dir")
+has(wArgs.join(" "), "umask 077", "write helper is private by default")
+has(wArgs.join(" "), ".tmp.$$", "write helper is atomic (tmp + mv)")
+has(wArgs.join(" "), "mv -f", "write helper renames into place")
+
 console.log("Model.js: all checks passed")

@@ -17,8 +17,17 @@ internet with, straight from the bar.
   reports *offline* after repeated failures, and it never retries faster than
   the poll interval.
 - **Details panel**: click the widget (left or right) to open a panel with the
-  address, country/flag, city/region, ISP and AS, the last-checked time, a
-  **Copy IP** action (Wayland `wl-copy`) and a manual **Check now**.
+  address, country/flag, city/region, ISP and AS, address family, last change,
+  last-checked time, a **Copy IP** action (Wayland `wl-copy`) and a manual
+  **Check now**.
+- **IP-change detection (VPN-leak alert)**: the widget remembers the last
+  public address and sends one quiet Omarchy notification whenever it really
+  changes — the classic VPN-leak signal (VPN drops, your IP slips back to your
+  home address). The first sighting after a fresh start is a silent baseline:
+  a state reset or a restart with an unchanged address never rings.
+- **Address history**: the panel keeps a short list of your previous public
+  addresses with the time they were replaced (calm empty state before the
+  first change).
 - **Custom icon**: a calm navy globe tile (128×128) in the visual language of
   the Nvag Pulse / DeepSpend plugins, shown both in the bar and in the panel.
 
@@ -48,6 +57,15 @@ omarchy restart shell
   full interval away, so an offline network never turns into a retry loop.
 - The widget shows the **last known address** while a check is in flight or
   after a single failure, so the bar never flickers.
+- **Change tracking is local and quiet**: the last known address and a short
+  history (max 6 entries) are persisted as JSON in
+  `~/.local/state/myip/state.json` (user-only, atomic writes). The first
+  successful check after a reset is a *baseline*, never an alert; only a real
+  address change emits one notification per transition. Twin bar instances
+  (one per monitor) dedupe through a flock gate in
+  `~/.local/state/myip/notifications.gate`, so a single change rings once.
+- A notification is only ever about an address *change*; there is no periodic
+  or startup announce.
 
 ## Privacy and the address service
 
@@ -63,8 +81,13 @@ address and coarse geo data:
 - The free tier is **HTTP only**; that trade-off is accepted because the
   payload is the public address and coarse country the service learns anyway
   when we ask it for our own IP. No other data is sent.
-- MyIP keeps **no history** of addresses and never writes the address to any
-  file; only short status lines go to the shell journal.
+- The widget's own state file keeps only the public address history needed
+  for change detection (see above) and never contains secrets. Only short
+  status lines go to the shell journal.
+- ip-api.com's self endpoint answers over the requesting IP family; on this
+  host that is IPv4, so the panel shows *IPv4*. The model marks the family of
+  whatever address the provider returns and the panel displays it — no
+  dead toggle is shown for an address family the provider never delivers.
 
 Alternatives were evaluated during development (ipify.org returns only the IP;
 ipinfo.io and ipwho.is free tiers carry monthly caps that a 60 s poll would
