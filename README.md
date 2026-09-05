@@ -6,6 +6,12 @@ internet with, straight from the bar.
 
 ![icon](assets/icon.png)
 
+![preview](assets/preview.png)
+
+*Preview — the widget in the bar and its details panel, showing sample data
+(an RFC 5737 example address, never a real one).*
+
+
 ## Features
 
 - **Live public IPv4 in the bar**: the widget shows your current public IP with
@@ -30,7 +36,7 @@ internet with, straight from the bar.
   addresses with the time they were replaced (calm empty state before the
   first change).
 - **Custom icon**: a calm navy globe tile (128×128) in the visual language of
-  the Nvag Pulse / DeepSpend plugins, shown both in the bar and in the panel.
+  the other Omarchy system plugins, shown both in the bar and in the panel.
 
 ## Install
 
@@ -46,6 +52,22 @@ For local development you can copy the folder instead:
 cp -r . ~/.config/omarchy/plugins/io.github.shirak-semonian.myip
 omarchy bar put io.github.shirak-semonian.myip
 omarchy restart shell
+```
+
+## Uninstall
+
+```sh
+omarchy plugin remove io.github.shirak-semonian.myip --yes
+omarchy restart shell
+```
+
+This removes the widget from the bar and the plugin from disk. Two small
+user files are **not** removed automatically, because they may hold history
+you want to keep — delete them too for a complete clean removal:
+
+```sh
+rm -f ~/.config/myip/config.json      # optional settings (if you made any)
+rm -rf ~/.local/state/myip            # last known address + change history
 ```
 
 ## How it works

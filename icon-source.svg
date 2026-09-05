@@ -15,7 +15,7 @@
     </radialGradient>
   </defs>
 
-  <!-- Calm navy tile, consistent with the Nvag Pulse / DeepSpend icon family -->
+  <!-- Calm navy tile, consistent with the other Omarchy system-plugin icons -->
   <rect x="2" y="2" width="124" height="124" rx="28" fill="url(#bg)"/>
 
   <!-- Soft green glow behind the globe (quiet "network is alive" accent) -->
