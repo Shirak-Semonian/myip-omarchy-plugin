@@ -1,0 +1,35 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#384964"/>
+      <stop offset="0.55" stop-color="#2E3C52"/>
+      <stop offset="1" stop-color="#202C40"/>
+    </linearGradient>
+    <linearGradient id="globeStroke" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E4EBF5"/>
+      <stop offset="1" stop-color="#A9B7C9"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0.6" stop-color="#5DC794" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#5DC794" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Calm navy tile, consistent with the Nvag Pulse / DeepSpend icon family -->
+  <rect x="2" y="2" width="124" height="124" rx="28" fill="url(#bg)"/>
+
+  <!-- Soft green glow behind the globe (quiet "network is alive" accent) -->
+  <circle cx="64" cy="63" r="46" fill="url(#glow)"/>
+
+  <!-- Globe: outer circle + one meridian ellipse, light steel strokes -->
+  <circle cx="64" cy="63" r="35" fill="none" stroke="url(#globeStroke)" stroke-width="7"/>
+  <ellipse cx="64" cy="63" rx="13" ry="35" fill="none" stroke="#8B9CB4" stroke-width="5"/>
+
+  <!-- Calm horizontal parallel so the globe reads as a sphere -->
+  <ellipse cx="64" cy="63" rx="35" ry="10" fill="none" stroke="#7E8FAA" stroke-width="4"/>
+
+  <!-- Live-location dot: the "you are here" pulse in the Nvag Pulse green -->
+  <circle cx="82" cy="49" r="12.5" fill="none" stroke="#5DC794" stroke-opacity="0.4" stroke-width="3"/>
+  <circle cx="82" cy="49" r="8" fill="#5DC794"/>
+  <circle cx="80" cy="47" r="2.4" fill="#C9F0DC"/>
+</svg>

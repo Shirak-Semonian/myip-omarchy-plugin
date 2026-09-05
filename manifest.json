@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.shirak-semonian.myip",
+  "name": "MyIP",
+  "version": "0.1.0",
+  "author": "Shirak Semonian",
+  "license": "MIT",
+  "description": "Your public IP at a glance: shows the live public IPv4 with its country flag in the Omarchy bar, with a calm offline state and a details panel with location, ISP/AS and copy. One quiet request per minute, no key, no account.",
+  "homepage": "https://github.com/Shirak-Semonian/myip-omarchy-plugin",
+  "repository": "https://github.com/Shirak-Semonian/myip-omarchy-plugin",
+  "keywords": [
+    "myip",
+    "ip",
+    "public-ip",
+    "network",
+    "geo",
+    "flag",
+    "vpn",
+    "security",
+    "system",
+    "widget"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "MyIP",
+    "description": "Public IP with country flag",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
