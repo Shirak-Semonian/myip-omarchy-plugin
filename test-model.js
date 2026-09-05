@@ -27,6 +27,16 @@ ok(!cmd.join(" ").includes("token") && !cmd.join(" ").includes("api-key"), "no s
 eq(M.buildFetchCommand({ requestTimeoutSeconds: 999 }).includes("999"), false, "timeout clamped")
 eq(M.buildFetchCommand({ requestTimeoutSeconds: 4 }).includes("4"), true, "custom timeout honored")
 
+// --- poll watchdog deadline ---------------------------------------------
+eq(M.fetchDeadlineMs(M.defaults()), 13000, "default deadline = timeout 8 + grace 5 -> 13 s")
+eq(M.fetchDeadlineMs({ requestTimeoutSeconds: 30 }), 35000, "max timeout -> 35 s deadline")
+eq(M.fetchDeadlineMs({ requestTimeoutSeconds: 3 }), 10000, "min timeout floored to 10 s")
+eq(M.fetchDeadlineMs({ requestTimeoutSeconds: 999 }), 13000, "clamped deadline (default)")
+eq(M.fetchDeadlineMs({ requestTimeoutSeconds: "x" }), 13000, "invalid timeout -> default deadline")
+eq(M.fetchDeadlineMs({}), 13000, "missing timeout -> default deadline")
+eq(M.fetchDeadlineMs(null), 13000, "null config -> default deadline")
+ok(M.fetchDeadlineMs({ requestTimeoutSeconds: 12 }) > 12000, "deadline always exceeds curl max-time")
+
 // --- parsing: success ----------------------------------------------------
 const sampleBody = JSON.stringify({
   status: "success", country: "The Netherlands", countryCode: "NL",

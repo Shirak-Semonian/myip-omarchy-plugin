@@ -29,10 +29,13 @@ import "Model.js" as Model
 // twin bar instances with a flock gate.
 //
 // Quiet by design:
-//   * one heartbeat Timer + one reusable fetch Process — at most one curl
-//     request in flight, at most one per poll interval (default 60 s);
-//     the extra Processes only run when an address change happens (state
-//     write + notification), never on the polling cadence;
+//   * one heartbeat Timer and at most one fetch Process in flight, at most
+//     one per poll interval (default 60 s); every poll runs on a *fresh*
+//     Process object (created per request, destroyed on exit), never a
+//     long-lived one — a Quickshell Process reused many times can lose an
+//     exit event and then report running forever, silently stopping the
+//     widget (MI-5). The extra Processes only run when an address change
+//     happens (state write + notification), never on the polling cadence;
 //   * _dueAt is a `double` epoch (Date.now() ~1.7e12) — an `int` would wrap
 //     at 2^31 and turn the dueAt guard into polling-spam;
 //   * after every attempt (success OR failure) the next poll is scheduled a
@@ -40,6 +43,14 @@ import "Model.js" as Model
 //   * a poll result that belongs to an older run (stale-result guard, epoch
 //     check) is dropped; the Model reducer additionally drops out-of-order
 //     events.
+//
+// Poll self-heal (watchdog): a healthy poll is bounded by curl's own
+// --max-time. The 1 s heartbeat checks that a running poll never exceeds
+// Model.fetchDeadlineMs() (timeout + 5 s, floor 10 s). If it does, the exit
+// event was lost or the child hung: the watchdog SIGKILLs the child, and if
+// the Process still does not report an exit shortly after, the wedged
+// Process object is dropped and the next poll starts on a fresh one — so a
+// single lost exit can never stall the widget again.
 //
 // Polling lives here (never in the panel) so every bar instance and the
 // panel share one source of truth.
@@ -58,8 +69,15 @@ BarWidget {
   // Millisecond epoch (Date.now() ~1.7e12): must be double, never int.
   property double _dueAt: 0
   property int _epoch: 0
-  property string _output: ""
   property string _logKey: ""
+  // Active poll (a fresh Process object per request) + poll watchdog state.
+  // When a poll overruns Model.fetchDeadlineMs() the watchdog kills it; if
+  // the Process still never exits, the object is dropped and the next poll
+  // starts on a fresh one (see startFetch/checkPollWatchdog/releasePoll).
+  property var _activePoll: null
+  property double _pollDeadlineAt: 0
+  property bool _pollKillSent: false
+  property int _pollRecoveries: 0
 
   readonly property string configPath: {
     var base = Quickshell.env("XDG_CONFIG_HOME")
@@ -257,30 +275,106 @@ BarWidget {
     Quickshell.execDetached([launcher, root.configPath])
   }
 
-  // One heartbeat tick. Starts a fetch only when the process is idle AND the
-  // poll interval has elapsed — the actual polling cadence.
+  // One heartbeat tick. Starts a fetch only when no poll is in flight AND
+  // the poll interval has elapsed — the actual polling cadence.
   function tick() {
-    if (proc.running) return
+    if (root._activePoll) return
     if (Date.now() < root._dueAt) return
-    root.view = Model.reduce(root.view, { type: "fetchStart" })
-    root._output = ""
-    var cmd = Model.buildFetchCommand(root.config)
-    if (!cmd || cmd.length === 0) return
-    proc.runEpoch = ++root._epoch
-    proc.command = cmd
-    proc.running = true
+    root.startFetch()
   }
 
-  function handleExited(exitCode) {
+  // Start one poll on a brand-new Process object. A single long-lived
+  // Process reused for many requests can lose an exit event in Quickshell
+  // and then report running forever (MI-5 poll-stop); a fresh object per
+  // request keeps the failure surface to one poll and lets the watchdog
+  // rebuild cleanly when an exit really is lost.
+  function startFetch() {
+    if (root._activePoll) return
+    var cmd = Model.buildFetchCommand(root.config)
+    if (!cmd || cmd.length === 0) return
+    root.view = Model.reduce(root.view, { type: "fetchStart" })
+    var poll = fetchProcessComponent.createObject(root, {
+      command: cmd,
+      runEpoch: ++root._epoch
+    })
+    if (!poll) {
+      console.warn("MyIP: could not create the poll process")
+      return
+    }
+    root._activePoll = poll
+    root._pollKillSent = false
+    root._pollDeadlineAt = Date.now()
+      + Model.fetchDeadlineMs(root.config)
+    poll.running = true
+  }
+
+  // Drop a poll Process object exactly once (createObject/destroy pair).
+  function releasePoll(poll) {
+    if (!poll || poll.released) return
+    poll.released = true
+    if (root._activePoll === poll) root._activePoll = null
+    poll.destroy()
+  }
+
+  // Poll watchdog (called from the 1 s heartbeat). A healthy fetch is
+  // bounded by curl's --max-time, so a poll still "running" past its
+  // deadline has lost its exit event or its child hung. First strike:
+  // SIGKILL the child and wait briefly for the exit event. Second strike:
+  // the Process object itself is wedged — drop it and schedule a recovery
+  // poll on a fresh object. Repeated recoveries back off to the normal
+  // interval so a pathological environment can never turn into a retry loop.
+  function checkPollWatchdog() {
+    var poll = root._activePoll
+    if (!poll) return
+    if (Date.now() < root._pollDeadlineAt) return
     var intervalMs = (root.config ? root.config.pollIntervalSeconds
       : Model.DEFAULT_POLL_INTERVAL_SECONDS) * 1000
+    if (!root._pollKillSent) {
+      root._pollKillSent = true
+      console.warn("MyIP: poll watchdog — fetch did not finish within "
+        + Math.round(Model.fetchDeadlineMs(root.config) / 1000)
+        + " s; killing the poll process")
+      // Any late result from this run is now stale.
+      ++root._epoch
+      poll.runEpoch = -1
+      try { poll.signal(9) } catch (error) { /* object may be gone */ }
+      try { poll.running = false } catch (error) { /* ditto */ }
+      root._pollDeadlineAt = Date.now() + 3000
+      return
+    }
+    console.warn("MyIP: poll watchdog — poll process did not recover; "
+      + "rebuilding the poll process")
+    ++root._epoch
+    root._pollRecoveries++
+    root.releasePoll(poll)
+    root._dueAt = Date.now()
+      + (root._pollRecoveries >= 3 ? intervalMs : 3000)
+  }
+
+  function handleFetchExited(poll, exitCode) {
+    if (!poll) return
+    var intervalMs = (root.config ? root.config.pollIntervalSeconds
+      : Model.DEFAULT_POLL_INTERVAL_SECONDS) * 1000
+    var killed = root._pollKillSent
+    if (root._activePoll !== poll || poll.runEpoch !== root._epoch) {
+      // Stale result: the watchdog already took over this run (killed +
+      // epoch bumped), or a newer poll replaced it. Drop it; after a
+      // watchdog kill the next attempt comes soon (bounded recovery), never
+      // as a tight retry loop.
+      root.releasePoll(poll)
+      if (killed && root._activePoll === null) {
+        root._pollRecoveries++
+        root._dueAt = Date.now()
+          + (root._pollRecoveries >= 3 ? intervalMs : 10000)
+      }
+      return
+    }
+    root._pollRecoveries = 0
+    root.releasePoll(poll)
     // Whatever the outcome, the next poll is a full interval away: a failing
     // endpoint never turns this into a retry loop.
     root._dueAt = Date.now() + intervalMs
-    // Stale-result guard: if a newer poll started while this request was
-    // finishing, its own exit will deliver the fresh result; drop this one.
-    if (proc.runEpoch !== root._epoch) return
-    var output = String(probeStdout.text || root._output || "")
+    var output = String(poll.pollOutput || "")
     var result = Model.parseFetchResult(exitCode, output)
     var at = Date.now()
     var next = result.ok
@@ -435,6 +529,9 @@ BarWidget {
     running: true
     triggeredOnStart: true
     onTriggered: {
+      // Poll self-heal first: a poll that overruns its deadline is killed /
+      // rebuilt regardless of the tracker/config gates below.
+      root.checkPollWatchdog()
       if (!root._trackerLoaded) {
         root.drainPendingTrackerLoad()
         return
@@ -508,17 +605,25 @@ BarWidget {
     onLoadFailed: root.loadTracker("")
   }
 
-  Process {
-    id: proc
-    property int runEpoch: -1
-    command: []
-    stdout: StdioCollector {
-      id: probeStdout
-      waitForEnd: true
-      onStreamFinished: root._output = text
-    }
-    onExited: function(exitCode) {
-      root.handleExited(exitCode)
+  // Fetch Process factory. Every poll runs on a fresh Process object so a
+  // wedged Process (lost exit event, MI-5) can never stall polling forever:
+  // the object is created per request and destroyed on exit / watchdog
+  // recovery. See startFetch()/handleFetchExited()/checkPollWatchdog().
+  Component {
+    id: fetchProcessComponent
+    Process {
+      id: fetchPoll
+      property int runEpoch: 0
+      property string pollOutput: ""
+      property bool released: false
+      command: []
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: fetchPoll.pollOutput = text
+      }
+      onExited: function(exitCode) {
+        root.handleFetchExited(fetchPoll, exitCode)
+      }
     }
   }
 

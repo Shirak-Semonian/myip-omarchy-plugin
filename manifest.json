@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.shirak-semonian.myip",
   "name": "MyIP",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "Shirak Semonian",
   "license": "MIT",
   "description": "Your public IP at a glance: shows the live public IPv4 with its country flag in the Omarchy bar, with a calm offline state and a details panel with location, ISP/AS, address history and copy. Quietly warns once when your public IP changes (VPN-leak alert). Quiet, configurable polling (default 60 s), no key, no account.",

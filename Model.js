@@ -60,6 +60,15 @@ var MAX_REQUEST_TIMEOUT_SECONDS = 30;
 var MAX_RESPONSE_BYTES = 65536; // 64 KiB — curl --max-filesize + parser cap
 var OFFLINE_AFTER_CONSECUTIVE_FAILURES = 2;
 
+// Poll watchdog margin. A healthy fetch is bounded by curl's own --max-time
+// (requestTimeoutSeconds, default 8 s); any fetch still "running" past the
+// deadline below has lost its Process exit event (or its child hung), so the
+// widget force-kills it and rebuilds the poll process. The deadline is the
+// clamped request timeout plus this fixed grace, with a 10 s floor so a very
+// short timeout still leaves a sane margin.
+var POLL_WATCHDOG_GRACE_SECONDS = 5;
+var POLL_WATCHDOG_FLOOR_SECONDS = 10;
+
 // Key-less display/behaviour preferences. Everything has a default and
 // the config file is optional, so an absent or empty config just works.
 var DEFAULT_ALERT_ON_CHANGE = true;
@@ -96,6 +105,20 @@ function defaults() {
     showCountry: DEFAULT_SHOW_COUNTRY,
     showFlag: DEFAULT_SHOW_FLAG
   };
+}
+
+// Watchdog deadline (ms) for one fetch, derived from the same clamped
+// request timeout that curl itself enforces with --max-time.
+function fetchDeadlineMs(config) {
+  var t = DEFAULT_REQUEST_TIMEOUT_SECONDS;
+  if (config && isFinite(config.requestTimeoutSeconds)) {
+    var r = Math.round(Number(config.requestTimeoutSeconds));
+    if (r >= MIN_REQUEST_TIMEOUT_SECONDS
+      && r <= MAX_REQUEST_TIMEOUT_SECONDS) t = r;
+  }
+  var seconds = Math.max(POLL_WATCHDOG_FLOOR_SECONDS,
+    t + POLL_WATCHDOG_GRACE_SECONDS);
+  return seconds * 1000;
 }
 
 // ---------------------------------------------------------------------------
@@ -832,7 +855,10 @@ if (typeof module !== "undefined") {
     DEFAULT_SHOW_FLAG: DEFAULT_SHOW_FLAG,
     MAX_RESPONSE_BYTES: MAX_RESPONSE_BYTES,
     OFFLINE_AFTER_CONSECUTIVE_FAILURES: OFFLINE_AFTER_CONSECUTIVE_FAILURES,
+    POLL_WATCHDOG_GRACE_SECONDS: POLL_WATCHDOG_GRACE_SECONDS,
+    POLL_WATCHDOG_FLOOR_SECONDS: POLL_WATCHDOG_FLOOR_SECONDS,
     defaults: defaults,
+    fetchDeadlineMs: fetchDeadlineMs,
     parseConfig: parseConfig,
     configKindText: configKindText,
     configProblemText: configProblemText,
