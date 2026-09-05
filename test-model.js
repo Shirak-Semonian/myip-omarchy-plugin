@@ -262,4 +262,166 @@ has(wArgs.join(" "), "umask 077", "write helper is private by default")
 has(wArgs.join(" "), ".tmp.$$", "write helper is atomic (tmp + mv)")
 has(wArgs.join(" "), "mv -f", "write helper renames into place")
 
+// =========================================================================
+// MI-3: config parsing, guards, recovery and display preferences
+// =========================================================================
+
+// --- config defaults + interval guards ------------------------------------
+eq(M.DEFAULT_ALERT_ON_CHANGE, true, "default alertOnChange true")
+eq(M.DEFAULT_SHOW_COUNTRY, true, "default showCountry true")
+eq(M.DEFAULT_SHOW_FLAG, true, "default showFlag true")
+eq(M.MIN_POLL_INTERVAL_SECONDS, 30, "poll interval min 30 s")
+eq(M.MAX_POLL_INTERVAL_SECONDS, 3600, "poll interval max 3600 s")
+eq(M.MIN_REQUEST_TIMEOUT_SECONDS, 3, "timeout min 3 s")
+eq(M.MAX_REQUEST_TIMEOUT_SECONDS, 30, "timeout max 30 s")
+const def = M.defaults()
+eq(def.pollIntervalSeconds, 60, "default interval")
+eq(def.requestTimeoutSeconds, 8, "default timeout")
+eq(def.alertOnChange, true, "default alert")
+eq(def.showCountry, true, "default country")
+eq(def.showFlag, true, "default flag")
+
+// --- parseConfig: missing / empty / whitespace = defaults ------------------
+for (const emptyInput of [null, undefined, "", "   \n  "]) {
+  const p = M.parseConfig(emptyInput)
+  eq(p.ok, true, "empty config is ok")
+  eq(p.kind, "empty", "empty config kind")
+  eq(p.config.pollIntervalSeconds, 60, "empty -> default interval")
+  eq(p.config.showFlag, true, "empty -> default flag")
+}
+
+// --- parseConfig: valid files ----------------------------------------------
+const full = M.parseConfig(JSON.stringify({
+  pollIntervalSeconds: 45,
+  requestTimeoutSeconds: 5,
+  alertOnChange: false,
+  showCountry: false,
+  showFlag: false
+}))
+eq(full.ok, true, "valid config parses")
+eq(full.config.pollIntervalSeconds, 45, "interval honored")
+eq(full.config.requestTimeoutSeconds, 5, "timeout honored")
+eq(full.config.alertOnChange, false, "alert honored")
+eq(full.config.showCountry, false, "showCountry honored")
+eq(full.config.showFlag, false, "showFlag honored")
+
+const partial = M.parseConfig(JSON.stringify({ pollIntervalSeconds: 120 }))
+eq(partial.ok, true, "partial config parses")
+eq(partial.config.pollIntervalSeconds, 120, "partial interval")
+eq(partial.config.showCountry, true, "partial keeps default showCountry")
+eq(partial.config.alertOnChange, true, "partial keeps default alert")
+
+// unknown keys are ignored (forward compatible)
+const unknown = M.parseConfig(JSON.stringify({ pollIntervalSeconds: 90, futureKey: "x", copyCommand: "echo pwn" }))
+eq(unknown.ok, true, "unknown keys ignored")
+eq(unknown.config.pollIntervalSeconds, 90, "known key still parsed")
+eq(unknown.config.showFlag, true, "unknown keys do not disturb defaults")
+
+// --- parseConfig: interval guards (clamp, never faster than min) -----------
+eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: 5 })).config.pollIntervalSeconds, 30, "below-min clamps to 30")
+eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: 0 })).config.pollIntervalSeconds, 30, "zero clamps to 30")
+eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: 99999 })).config.pollIntervalSeconds, 3600, "huge clamps to 3600")
+eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: "75" })).config.pollIntervalSeconds, 75, "numeric string honored")
+eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: 30.6 })).config.pollIntervalSeconds, 31, "fraction rounds")
+eq(M.parseConfig(JSON.stringify({ requestTimeoutSeconds: 1 })).config.requestTimeoutSeconds, 3, "timeout below-min clamps to 3")
+eq(M.parseConfig(JSON.stringify({ requestTimeoutSeconds: 99 })).config.requestTimeoutSeconds, 30, "timeout huge clamps to 30")
+eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: "fast" })).ok, false, "non-numeric interval is a field error")
+eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: true })).ok, false, "boolean interval is a field error")
+
+// --- parseConfig: invalid JSON / wrong shape (DS-5: no content leak) -------
+const secret = "sk-myip-super-secret-value-123456"
+const garbage = "not json " + secret + " {"
+const badParse = M.parseConfig(garbage)
+eq(badParse.ok, false, "invalid json -> error")
+eq(badParse.kind, "parse", "invalid json kind")
+ok(!badParse.error.includes(secret) && !badParse.hint.includes(secret), "parse error never echoes file content")
+ok(!M.configProblemText(badParse).includes(secret), "problem text never echoes file content")
+
+eq(M.parseConfig("[1,2]").ok, false, "array root -> error")
+eq(M.parseConfig("42").ok, false, "number root -> error")
+eq(M.parseConfig("\"str\"").ok, false, "string root -> error")
+
+// --- parseConfig: wrong boolean type is a calm field error ------------------
+const badBool = M.parseConfig(JSON.stringify({ showFlag: "yes" }))
+eq(badBool.ok, false, "wrong boolean type -> error")
+eq(badBool.kind, "field", "wrong boolean kind")
+ok(!M.configProblemText(badBool).includes("yes"), "field error does not echo the value")
+eq(M.parseConfig(JSON.stringify({ alertOnChange: 1 })).ok, false, "number alert -> error")
+eq(M.parseConfig(JSON.stringify({ showCountry: "true" })).ok, false, "string boolean -> error")
+
+// --- template + reset command ----------------------------------------------
+const tpl = M.templateConfigText()
+const tplParsed = M.parseConfig(tpl)
+eq(tplParsed.ok, true, "defaults template is valid config")
+eq(tplParsed.config.pollIntervalSeconds, 60, "template interval is the default")
+eq(tplParsed.config.showCountry, true, "template showCountry default")
+ok(!tpl.includes("secret") && !tpl.includes("key"), "template has no secret placeholder")
+
+const resetArgs = M.resetConfigCommandArgs("/home/u/.config/myip", tpl)
+eq(resetArgs[0], "bash", "reset uses bash")
+has(resetArgs.join(" "), "mkdir -p", "reset creates the dir")
+has(resetArgs.join(" "), "umask 077", "reset is private by default")
+has(resetArgs.join(" "), ".bak-$", "reset backs up the broken file")
+has(resetArgs.join(" "), "chmod 600", "reset enforces mode 600")
+has(resetArgs.join(" "), "printf '%s' \"$2\"", "reset writes template via argv")
+ok(!resetArgs[2].includes(tpl), "template never interpolated into the shell script text")
+
+// --- copy argv: fixed Omarchy IPC, no shell, no user-configurable command --
+const copy = M.copyCommandArgs("/usr/bin", "203.0.113.7")
+eq(copy[0], "/usr/bin/omarchy-clipboard-paste-text", "fixed Omarchy clipboard tool")
+eq(copy[1], "--copy-only", "copy-only flag")
+eq(copy[2], "203.0.113.7", "ip is a plain positional argument")
+ok(copy.indexOf("bash") === -1 && copy.indexOf("-c") === -1, "copy never goes through a shell")
+const weirdIp = "1.2.3.4; rm -rf /"
+const weirdCopy = M.copyCommandArgs("/usr/bin", weirdIp)
+eq(weirdCopy[2], weirdIp, "value travels as one argv element, never interpolated")
+
+// --- barFlag / countryFragment honour showCountry/showFlag -------------------
+const cfgShowAll = { pollIntervalSeconds: 60, showCountry: true, showFlag: true }
+const cfgNoFlag = { pollIntervalSeconds: 60, showCountry: true, showFlag: false }
+const cfgNoCountry = { pollIntervalSeconds: 60, showCountry: false, showFlag: true }
+const cfgMinimal = { pollIntervalSeconds: 60, showCountry: false, showFlag: false }
+const geoView = { status: "ok", at: 0, data: { ip: "203.0.113.7", country: "The Netherlands", countryCode: "NL", isp: "X" }, message: "", consecutiveFailures: 0 }
+eq(M.barFlag(geoView, cfgShowAll), "\u{1F1F3}\u{1F1F1}", "bar flag shown when showFlag")
+eq(M.barFlag(geoView, cfgNoFlag), "", "bar flag hidden when showFlag=false")
+eq(M.barFlag(geoView, cfgNoCountry), "\u{1F1F3}\u{1F1F1}", "bar flag independent of showCountry")
+eq(M.barFlag({ status: "offline", data: geoView.data }, cfgShowAll), "", "no flag while offline")
+eq(M.barFlag(M.initialView(), cfgShowAll), "", "no flag while loading")
+
+eq(M.countryFragment(geoView.data, cfgShowAll), "The Netherlands \u{1F1F3}\u{1F1F1}", "country + flag")
+eq(M.countryFragment(geoView.data, cfgNoFlag), "The Netherlands", "country without flag")
+eq(M.countryFragment(geoView.data, cfgNoCountry), "\u{1F1F3}\u{1F1F1}", "flag without country text")
+eq(M.countryFragment(geoView.data, cfgMinimal), "", "no geo in minimal mode")
+eq(M.countryFragment(null, cfgShowAll), "", "null data -> empty")
+
+// --- tooltip edge cases: states, prefs, last check --------------------------
+// Construct timestamps in LOCAL time so the hh:mm:ss expectation is TZ-proof.
+const atMorning = new Date(2026, 0, 2, 9, 5, 7).getTime()
+const tOkAll = M.tooltipText({ ...geoView, at: atMorning }, cfgShowAll)
+has(tOkAll, "203.0.113.7", "tooltip has the ip")
+has(tOkAll, "The Netherlands", "tooltip has the country")
+has(tOkAll, "\u{1F1F3}\u{1F1F1}", "tooltip has the flag")
+has(tOkAll, "last check 09:05:07", "tooltip has the last check time")
+ok(!M.tooltipText(geoView, cfgNoFlag).includes("\u{1F1F3}\u{1F1F1}"), "no flag in tooltip when disabled")
+ok(!M.tooltipText(geoView, cfgNoCountry).includes("The Netherlands"), "no country text in tooltip when disabled")
+
+const tLoading = M.tooltipText(M.initialView(), cfgShowAll)
+has(tLoading, "checking", "loading tooltip calm")
+
+const offlineView = { status: "offline", at: atMorning, data: geoView.data, message: "connection failed", consecutiveFailures: 2 }
+const tOff = M.tooltipText(offlineView, cfgShowAll)
+has(tOff, "offline", "offline tooltip says offline")
+has(tOff, "retrying every 60 s", "offline tooltip names the retry interval")
+has(tOff, "last known 203.0.113.7", "offline tooltip keeps last known")
+has(tOff, "last check 09:05:07", "offline tooltip has last check time")
+const tOffNoCountry = M.tooltipText(offlineView, cfgMinimal)
+ok(!tOffNoCountry.includes("(NL)"), "offline tooltip hides country code when disabled")
+
+// fetch edge states map to calm messages (no IP / no network / timeout / rate limit)
+has(M.parseFetchResult(0, JSON.stringify({ status: "success", query: "" }) + M.HTTP_MARKER + "200").message, "did not include an IP", "empty query message")
+has(M.parseFetchResult(0, "").message, "empty response", "empty output message")
+has(M.tooltipText({ status: "offline", at: 1, data: null, message: "rate limited (too many requests)", consecutiveFailures: 2 }, cfgShowAll), "offline", "rate limit keeps calm offline state")
+has(M.parseFetchResult(0, "{}" + M.HTTP_MARKER + "429").message, "rate limited", "http 429 text")
+has(M.parseFetchResult(0, "{}" + M.HTTP_MARKER + "500").message, "HTTP 500", "http 500 text")
+
 console.log("Model.js: all checks passed")

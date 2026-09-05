@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.shirak-semonian.myip",
   "name": "MyIP",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Shirak Semonian",
   "license": "MIT",
-  "description": "Your public IP at a glance: shows the live public IPv4 with its country flag in the Omarchy bar, with a calm offline state and a details panel with location, ISP/AS, address history and copy. Quietly warns once when your public IP changes (VPN-leak alert). One quiet request per minute, no key, no account.",
+  "description": "Your public IP at a glance: shows the live public IPv4 with its country flag in the Omarchy bar, with a calm offline state and a details panel with location, ISP/AS, address history and copy. Quietly warns once when your public IP changes (VPN-leak alert). Quiet, configurable polling (default 60 s), no key, no account.",
   "homepage": "https://github.com/Shirak-Semonian/myip-omarchy-plugin",
   "repository": "https://github.com/Shirak-Semonian/myip-omarchy-plugin",
   "keywords": [

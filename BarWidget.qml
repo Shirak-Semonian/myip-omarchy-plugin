@@ -9,8 +9,16 @@ import "Model.js" as Model
 //
 // The bar shows the custom MyIP icon, the widget name and the live public IP
 // with its flag emoji: `[icon] MyIP 203.0.113.7 🇳🇱`. Hovering gives a calm
-// tooltip (status + country + ISP). Left/right click toggles the details
-// panel; middle click forces an immediate check.
+// tooltip (status + country + ISP + last check). Left/right click toggles the
+// details panel; middle click forces an immediate check.
+//
+// MI-3 (config): an optional, key-less `~/.config/myip/config.json` tunes the
+// poll interval (min 30 s), timeout, change alerts and country/flag display.
+// Missing/empty file = defaults; a valid file is applied live; a broken file
+// (DS-5) never crashes the widget and never leaks content — the widget keeps
+// running with defaults while the panel offers a calm "reset to defaults".
+// Copying always uses Omarchy's fixed clipboard IPC (no copyCommand config,
+// no shell interpolation).
 //
 // MI-2 (address-change detection): every successful check feeds a tiny
 // persistent tracker (state file + short history). The first sighting after
@@ -40,6 +48,11 @@ BarWidget {
   moduleName: "io.github.shirak-semonian.myip"
 
   // ---- config / state ----------------------------------------------------
+  // Optional key-less config (~/.config/myip/config.json). A missing/empty
+  // file means defaults; a valid file tunes interval/display/alert prefs; a
+  // broken file shows a calm config-attention state and keeps running with
+  // defaults (reset action in the panel repairs it). FileView watchers are
+  // active, so an external edit or a reset is picked up live.
   property var config: Model.defaults()
   property var view: Model.initialView()
   // Millisecond epoch (Date.now() ~1.7e12): must be double, never int.
@@ -47,6 +60,37 @@ BarWidget {
   property int _epoch: 0
   property string _output: ""
   property string _logKey: ""
+
+  readonly property string configPath: {
+    var base = Quickshell.env("XDG_CONFIG_HOME")
+    if (!base) base = (Quickshell.env("HOME") || "") + "/.config"
+    return base + "/myip/config.json"
+  }
+  readonly property string configDir: {
+    var idx = root.configPath.lastIndexOf("/")
+    return idx > 0 ? root.configPath.substring(0, idx) : root.configPath
+  }
+  property string configErrorKind: ""
+  property var _configProblem: null
+  property var _lastConfigRaw: null
+  property bool _configSeen: false
+  property bool _configLoadFailed: false
+  property double _configRetryAt: 0
+
+  // Calm human-readable config problem (static text; never file content).
+  readonly property string configError: root.configErrorKind !== ""
+    ? Model.configProblemText(root._configProblem) : ""
+
+  // True while the config file is broken: the widget runs on defaults and
+  // the panel shows a "reset to defaults" action.
+  readonly property bool configAttention: root.configErrorKind !== ""
+
+  readonly property bool alertOnChange: !root.config
+    || root.config.alertOnChange !== false
+  readonly property bool showCountry: !root.config
+    || root.config.showCountry !== false
+  readonly property bool showFlag: !root.config
+    || root.config.showFlag !== false
 
   // ---- MI-2: address-change tracker + notifications ----------------------
   // The tracker (last known address + short history) lives in a tiny JSON
@@ -76,6 +120,7 @@ BarWidget {
   // ---- display helpers ---------------------------------------------------
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.5)
+  readonly property color warn: "#ebcb8b"
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property bool hasOk: Model.isOk(root.view)
@@ -84,8 +129,16 @@ BarWidget {
   readonly property bool dimmed: Model.isDimmed(root.view)
 
   readonly property string valueText: Model.barValueText(root.view)
-  readonly property string flagText: Model.isOk(root.view) && root.view.data
-    ? Model.flagEmoji(root.view.data.countryCode) : ""
+  // Flag only when the user enables it AND the state is fresh enough.
+  readonly property string flagText: Model.barFlag(root.view, root.config)
+  readonly property string widgetTooltip: {
+    var base = Model.tooltipText(root.view, root.config)
+    if (root.configAttention) {
+      return "MyIP \u2014 config file needs attention \u00b7 using defaults \u00b7 "
+        + root.configError + " \u00b7 click for reset"
+    }
+    return base
+  }
 
   // ---- panel popup. Shape contract for shell summon/hide/toggle routing:
   //      Bar.findPanelWidget requires open/close/opened on the bar-widget
@@ -140,6 +193,68 @@ BarWidget {
   function copyIp() {
     var target = panelLoader.item
     if (target && typeof target.copyIp === "function") target.copyIp()
+  }
+
+  // ---- MI-3: config file ------------------------------------------------
+  // Apply one raw config file read. A missing/empty file = defaults; a
+  // broken file keeps the defaults and records a calm attention state; a
+  // valid file replaces root.config. Identical reloads are ignored so a
+  // FileView watch event never resets the poll timer needlessly.
+  function applyConfig(raw) {
+    if (raw === root._lastConfigRaw) return
+    root._lastConfigRaw = raw
+    root._configSeen = true
+    var parsed = Model.parseConfig(raw)
+    if (!parsed.ok) {
+      // Broken file (DS-5): run with defaults, keep the widget calm and let
+      // the panel offer "reset to defaults". Raw content is never logged.
+      root.configErrorKind = parsed.kind
+      root._configProblem = parsed
+      root.config = Model.defaults()
+      console.warn("MyIP: " + Model.configProblemText(parsed))
+      return
+    }
+    var intervalChanged = parsed.config.pollIntervalSeconds
+      !== root.config.pollIntervalSeconds
+    root.configErrorKind = ""
+    root._configProblem = null
+    root.config = parsed.config
+    root._logKey = ""
+    if (intervalChanged && !root._configLoadFailed) {
+      // Apply the new cadence from now: never poll sooner than the current
+      // dueAt, but do not wait longer than one fresh interval either.
+      var fresh = Date.now() + parsed.config.pollIntervalSeconds * 1000
+      root._dueAt = Math.min(root._dueAt, fresh)
+    }
+    // Journal transparency: static summary only, never config contents.
+    console.log("MyIP: config loaded — poll every "
+      + parsed.config.pollIntervalSeconds + " s, alert "
+      + (parsed.config.alertOnChange ? "on" : "off")
+      + ", country " + (parsed.config.showCountry ? "on" : "off")
+      + ", flag " + (parsed.config.showFlag ? "on" : "off"))
+    Qt.callLater(root.tick)
+  }
+
+  function refreshConfig() {
+    configFile.reload()
+  }
+
+  // Panel action: back up the broken file and write the defaults template.
+  function resetConfigFile() {
+    if (configWriteProc.running) return
+    configWriteProc.command = Model.resetConfigCommandArgs(
+      root.configDir, Model.templateConfigText())
+    configWriteProc.running = true
+  }
+
+  // Panel action: open the config in the user's editor (fixed Omarchy
+  // launcher; path travels as argv, never through a shell).
+  function openConfigFile() {
+    var omarchyPath = Quickshell.env("OMARCHY_PATH")
+    var launcher = omarchyPath
+      ? omarchyPath + "/bin/omarchy-launch-config-editor"
+      : "/usr/bin/omarchy-launch-config-editor"
+    Quickshell.execDetached([launcher, root.configPath])
   }
 
   // One heartbeat tick. Starts a fetch only when the process is idle AND the
@@ -246,8 +361,11 @@ BarWidget {
   // instances through the flock gate (Model.notifGateCommandArgs): the first
   // instance to reach the gate sends; twins that observed the same change
   // skip. Gate failures degrade to "skip" — never to a duplicate.
+  // alertOnChange=false in the config silences change alerts entirely (the
+  // tracker still records history; only the popup is suppressed).
   function enqueueChangeNotification(event) {
-    var parts = Model.changeNotificationParts(event)
+    if (!root.alertOnChange) return
+    var parts = Model.changeNotificationParts(event, root.config)
     if (!parts || !parts.summary) return
     var args = []
     var omarchyPath = Quickshell.env("OMARCHY_PATH")
@@ -279,7 +397,7 @@ BarWidget {
       var entry = root._notifPending
       root._notifPending = null
       if (gate === "send" && entry && entry.args) {
-        var parts = Model.changeNotificationParts(entry.event)
+        var parts = Model.changeNotificationParts(entry.event, root.config)
         console.log("MyIP: notification — "
           + (parts && parts.body ? parts.body : "IP changed"))
         notifProc.command = entry.args
@@ -308,6 +426,8 @@ BarWidget {
   // when a request may actually start (idle process + interval elapsed).
   // Before the tracker file has been resolved (or confirmed missing) the
   // tick is paused so the first observation can never race the baseline.
+  // The optional config file is read at startup (and re-checked whenever a
+  // previous read failed, e.g. the file did not exist yet).
   Timer {
     id: pollTimer
     interval: 1000
@@ -319,7 +439,57 @@ BarWidget {
         root.drainPendingTrackerLoad()
         return
       }
+      if (!root._configSeen) {
+        configFile.reload()
+        return
+      }
+      if (root._configLoadFailed && Date.now() >= root._configRetryAt) {
+        root._configRetryAt = Date.now() + 10000
+        configFile.reload()
+      }
       root.tick()
+    }
+  }
+
+  // The optional config file (~/.config/myip/config.json). Watch is on so a
+  // manual edit or a panel "reset to defaults" is applied live. A missing
+  // file is not an error: the widget simply keeps the defaults.
+  FileView {
+    id: configFile
+    path: root.configPath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      root._configLoadFailed = false
+      root.applyConfig(text())
+    }
+    onFileChanged: reload()
+    onLoadFailed: {
+      // A missing config file is not an error — the widget keeps the
+      // defaults. This fires on the first load attempt (no file yet) and
+      // again when an existing file disappears; both mean "use defaults".
+      root._lastConfigRaw = null
+      root._configSeen = true
+      root._configLoadFailed = true
+      root._configRetryAt = Date.now() + 10000
+      root.configErrorKind = ""
+      root._configProblem = null
+      root.config = Model.defaults()
+    }
+  }
+
+  // Panel "reset to defaults": atomic backup + write, see resetConfigFile().
+  Process {
+    id: configWriteProc
+    command: []
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        console.warn("MyIP: could not reset the config file")
+        return
+      }
+      root._lastConfigRaw = null
+      Qt.callLater(root.refreshConfig)
     }
   }
 
@@ -403,6 +573,7 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function reset(): void { root.resetConfigFile() }
   }
 
   // Full-size interaction layer. Its own label is hidden; the composed
@@ -414,8 +585,7 @@ BarWidget {
     bar: root.bar
     text: " "
     labelVisible: false
-    tooltipText: Model.tooltipText(root.view,
-      root.config ? root.config.pollIntervalSeconds : Model.DEFAULT_POLL_INTERVAL_SECONDS)
+    tooltipText: root.widgetTooltip
     onPressed: function(buttonCode) {
       root.handlePressed(buttonCode)
     }
@@ -453,7 +623,7 @@ BarWidget {
       anchors.leftMargin: Style.space(6)
       anchors.verticalCenter: parent.verticalCenter
       text: "MyIP"
-      color: root.dim
+      color: root.configAttention ? root.warn : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
       verticalAlignment: Text.AlignVCenter

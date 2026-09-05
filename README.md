@@ -15,10 +15,11 @@ internet with, straight from the bar.
   address or a quiet *offline* state (dimmed icon, informative tooltip). A
   single failed check never hides the last known address; the widget only
   reports *offline* after repeated failures, and it never retries faster than
-  the poll interval.
+  the poll interval. Tooltips show the address, country/flag, ISP and the
+  last-check time in every state.
 - **Details panel**: click the widget (left or right) to open a panel with the
   address, country/flag, city/region, ISP and AS, address family, last change,
-  last-checked time, a **Copy IP** action (Wayland `wl-copy`) and a manual
+  last-checked time, a **Copy IP** action (Omarchy clipboard IPC) and a manual
   **Check now**.
 - **IP-change detection (VPN-leak alert)**: the widget remembers the last
   public address and sends one quiet Omarchy notification whenever it really
@@ -65,7 +66,47 @@ omarchy restart shell
   (one per monitor) dedupe through a flock gate in
   `~/.local/state/myip/notifications.gate`, so a single change rings once.
 - A notification is only ever about an address *change*; there is no periodic
-  or startup announce.
+  or startup announce. `alertOnChange: false` in the config silences the
+  change popup while the history is still tracked.
+
+## Configuration
+
+MyIP is fully optional and **key-less**: an absent or empty config file means
+“run with defaults”. To tune it, create `~/.config/myip/config.json`
+(user-only, `chmod 600`):
+
+```json
+{
+  "pollIntervalSeconds": 60,
+  "requestTimeoutSeconds": 8,
+  "alertOnChange": true,
+  "showCountry": true,
+  "showFlag": true
+}
+```
+
+| Key                     | Default | Meaning                                                          |
+| ----------------------- | ------- | ---------------------------------------------------------------- |
+| `pollIntervalSeconds`   | `60`    | Seconds between public-IP checks (clamped to 30–3600)            |
+| `requestTimeoutSeconds` | `8`     | Per-request timeout in seconds (clamped to 3–30)                 |
+| `alertOnChange`         | `true`  | Show the IP-change popup when your public address changes        |
+| `showCountry`           | `true`  | Show the country name / location in the panel and tooltips       |
+| `showFlag`              | `true`  | Show the flag emoji in the bar, panel and notifications          |
+
+Unknown keys are ignored, so a future version can add settings without
+breaking older files. The file is watched live: save an edit and the widget
+picks it up within a second — no restart needed.
+
+If the file becomes unreadable or contains invalid JSON, the widget stays
+calm, keeps running with defaults and shows a *config file needs attention*
+state in the panel with a **Reset to defaults** action (the broken file is
+first kept as `config.json.bak-<timestamp>`). Config contents are never shown
+in the UI or the journal — only fixed, human-readable problem sentences.
+
+**Copy is fixed, not configurable**: there is no `copyCommand` setting and no
+shell interpolation of user input. The Copy action always calls Omarchy's own
+clipboard IPC (`omarchy-clipboard-paste-text --copy-only`) with the address as
+a plain positional argument.
 
 ## Privacy and the address service
 

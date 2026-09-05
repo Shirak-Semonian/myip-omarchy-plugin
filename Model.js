@@ -52,9 +52,19 @@ var QUERY_FIELDS = "status,message,country,countryCode,regionName,city,isp,org,a
 var HTTP_MARKER = "\n__MYIP_HTTP__";
 
 var DEFAULT_POLL_INTERVAL_SECONDS = 60;
+var MIN_POLL_INTERVAL_SECONDS = 30;   // DS-7 guard: never poll faster than this
+var MAX_POLL_INTERVAL_SECONDS = 3600; // sane upper bound (an hour is plenty)
 var DEFAULT_REQUEST_TIMEOUT_SECONDS = 8;
+var MIN_REQUEST_TIMEOUT_SECONDS = 3;
+var MAX_REQUEST_TIMEOUT_SECONDS = 30;
 var MAX_RESPONSE_BYTES = 65536; // 64 KiB — curl --max-filesize + parser cap
 var OFFLINE_AFTER_CONSECUTIVE_FAILURES = 2;
+
+// MI-3: key-less display/behaviour preferences. Everything has a default and
+// the config file is optional, so an absent or empty config just works.
+var DEFAULT_ALERT_ON_CHANGE = true;
+var DEFAULT_SHOW_COUNTRY = true;
+var DEFAULT_SHOW_FLAG = true;
 
 // MI-2: public-IP change tracking. The widget keeps the last known address
 // (plus a short history) in a tiny state file and notifies once per real
@@ -81,8 +91,193 @@ var CURL_ERROR_TEXT = {
 function defaults() {
   return {
     pollIntervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS,
-    requestTimeoutSeconds: DEFAULT_REQUEST_TIMEOUT_SECONDS
+    requestTimeoutSeconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    alertOnChange: DEFAULT_ALERT_ON_CHANGE,
+    showCountry: DEFAULT_SHOW_COUNTRY,
+    showFlag: DEFAULT_SHOW_FLAG
   };
+}
+
+// ---------------------------------------------------------------------------
+// MI-3: config file (~/.config/myip/config.json)
+// ---------------------------------------------------------------------------
+// The config is entirely optional and key-less:
+//   * a missing or empty file simply means "defaults";
+//   * a valid file may set pollIntervalSeconds (>= 30 s, clamped),
+//     requestTimeoutSeconds, alertOnChange, showCountry and/or showFlag;
+//   * a *broken* file (invalid JSON / wrong shape / wrong field type) must
+//     never crash the widget and never surface raw file content: the panel
+//     shows a calm problem line plus a "reset to defaults" action
+//     (DS-5 lesson: no content/key leak in UI or errors).
+//
+// parseConfig returns
+//   { ok: true, config: {...} }
+// or
+//   { ok: false, kind: "empty"|"parse"|"shape"|"field", error, hint }
+// `error` is a fixed sentence and `hint` is a fixed suggestion; neither ever
+// contains the raw config text (DS-5: engine JSON error messages can quote
+// the offending content and are therefore never surfaced verbatim).
+
+function configKindText(kind) {
+  if (kind === "empty") return "config file is empty";
+  if (kind === "parse") return "config file is not valid JSON";
+  if (kind === "shape") return "config file must contain a JSON object";
+  return "config file has an invalid value";
+}
+
+// Keep a numeric config field inside [min, max]; missing/NaN falls back.
+function clampNumber(value, fallback, min, max) {
+  var n = Number(value);
+  if (!isFinite(n)) return fallback;
+  if (n < min) return min;
+  if (n > max) return max;
+  return Math.round(n);
+}
+
+// True when the config value is a finite number or a numeric string.
+function isNumericConfigValue(value) {
+  if (typeof value === "number") return isFinite(value);
+  if (typeof value !== "string") return false;
+  return value.trim() !== "" && isFinite(Number(value));
+}
+
+// Parse and validate config.json text. Returns { ok, config|error|hint }.
+function parseConfig(raw) {
+  var text = String(raw == null ? "" : raw);
+  if (text.trim() === "") {
+    return { ok: true, config: defaults(), kind: "empty" };
+  }
+  var parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    // Never surface the engine error (it can echo file content, DS-5).
+    return { ok: false, kind: "parse", error: configKindText("parse"),
+      hint: "Check the double quotes, commas and braces." };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, kind: "shape", error: configKindText("shape"),
+      hint: "The file should look like {\"pollIntervalSeconds\": 60}." };
+  }
+  var cfg = defaults();
+  if (parsed.pollIntervalSeconds !== undefined) {
+    if (!isNumericConfigValue(parsed.pollIntervalSeconds)) {
+      return { ok: false, kind: "field", error: configKindText("field"),
+        hint: "\"pollIntervalSeconds\" must be a number between "
+          + MIN_POLL_INTERVAL_SECONDS + " and "
+          + MAX_POLL_INTERVAL_SECONDS + "." };
+    }
+    cfg.pollIntervalSeconds = clampNumber(parsed.pollIntervalSeconds,
+      DEFAULT_POLL_INTERVAL_SECONDS, MIN_POLL_INTERVAL_SECONDS,
+      MAX_POLL_INTERVAL_SECONDS);
+  }
+  if (parsed.requestTimeoutSeconds !== undefined) {
+    if (!isNumericConfigValue(parsed.requestTimeoutSeconds)) {
+      return { ok: false, kind: "field", error: configKindText("field"),
+        hint: "\"requestTimeoutSeconds\" must be a number between "
+          + MIN_REQUEST_TIMEOUT_SECONDS + " and "
+          + MAX_REQUEST_TIMEOUT_SECONDS + "." };
+    }
+    cfg.requestTimeoutSeconds = clampNumber(parsed.requestTimeoutSeconds,
+      DEFAULT_REQUEST_TIMEOUT_SECONDS, MIN_REQUEST_TIMEOUT_SECONDS,
+      MAX_REQUEST_TIMEOUT_SECONDS);
+  }
+  // Booleans are strict: a wrong type is a calm "field" problem the panel can
+  // offer to reset (like DeepSpend's notificationsEnabled). Numbers clamp.
+  var boolKeys = ["alertOnChange", "showCountry", "showFlag"];
+  for (var bi = 0; bi < boolKeys.length; bi++) {
+    var key = boolKeys[bi];
+    if (parsed[key] === undefined) continue;
+    if (typeof parsed[key] !== "boolean") {
+      return { ok: false, kind: "field", error: configKindText("field"),
+        hint: "\"" + key + "\" must be true or false." };
+    }
+    cfg[key] = parsed[key];
+  }
+  return { ok: true, config: cfg };
+}
+
+// Calm, fixed-language explanation of a config problem for the panel/tooltip.
+// `problem` is the { ok:false, kind, error, hint } object from parseConfig.
+function configProblemText(problem) {
+  if (!problem || problem.ok) return "";
+  var kind = problem.kind || "parse";
+  var base = problem.error || configKindText(kind);
+  var text = base;
+  if (problem.hint) text += " " + problem.hint;
+  return text;
+}
+
+// argv: bash -c script dir; backs up any existing config to config.json.bak-<ts>
+// and writes the defaults template in its place (mode 600 via umask 077,
+// atomic tmp+mv). Never touches shell syntax with file content: the template
+// travels as an argv element, and config values are never echoed.
+function resetConfigCommandArgs(dir, template) {
+  var d = String(dir == null ? "" : dir);
+  var t = String(template == null ? "" : template);
+  var script = "umask 077;"
+    + " mkdir -p -- \"$1\" || exit 1;"
+    + " f=\"$1/config.json\";"
+    + " if [ -f \"$f\" ]; then"
+    + "   ts=$(date +%s)-$$; cp -a -- \"$f\" \"$f.bak-$ts\" || exit 1;"
+    + " fi;"
+    + " tmp=\"$f.tmp.$$\";"
+    + " printf '%s' \"$2\" > \"$tmp\" || exit 1;"
+    + " mv -f -- \"$tmp\" \"$f\" || exit 1;"
+    + " chmod 600 \"$f\" || exit 1;"
+    + " echo reset";
+  return ["bash", "-c", script, "myip-reset-config", d, t];
+}
+
+// Defaults template written by "reset to defaults". Static text: no secrets,
+// no user data; the widget then reloads and runs with these values.
+function templateConfigText() {
+  var d = defaults();
+  return "{\n"
+    + "  \"pollIntervalSeconds\": " + d.pollIntervalSeconds + ",\n"
+    + "  \"requestTimeoutSeconds\": " + d.requestTimeoutSeconds + ",\n"
+    + "  \"alertOnChange\": " + d.alertOnChange + ",\n"
+    + "  \"showCountry\": " + d.showCountry + ",\n"
+    + "  \"showFlag\": " + d.showFlag + "\n"
+    + "}\n";
+}
+
+// ---------------------------------------------------------------------------
+// Copy action (MI-3): fixed Omarchy clipboard IPC, never a shell command.
+// ---------------------------------------------------------------------------
+// The public IP travels as a *positional argument* to Omarchy's own
+// clipboard-paste tool (`--copy-only`), which pipes it into wl-copy. There is
+// no copyCommand config and no shell interpolation of user input anywhere.
+function copyCommandArgs(binDir, ip) {
+  var dir = String(binDir == null ? "" : binDir);
+  return [dir + "/omarchy-clipboard-paste-text", "--copy-only",
+    String(ip == null ? "" : ip)];
+}
+
+// ---------------------------------------------------------------------------
+// Display prefs: showCountry / showFlag / alertOnChange
+// ---------------------------------------------------------------------------
+// Bar flag emoji only when the user wants flags and the country is known.
+function barFlag(view, cfg) {
+  if (!isOk(view) || !view.data || !cfg || cfg.showFlag === false) return "";
+  return flagEmoji(view.data.countryCode);
+}
+
+// Country/flag fragment used by the tooltip's ok/offline text.
+function countryFragment(data, cfg) {
+  if (!data) return "";
+  var showCountry = !cfg || cfg.showCountry !== false;
+  var showFlag = !cfg || cfg.showFlag !== false;
+  var parts = [];
+  if (showCountry) {
+    if (data.country) parts.push(data.country);
+    else if (data.countryCode) parts.push(data.countryCode);
+  }
+  if (showFlag && data.countryCode) {
+    var flag = flagEmoji(data.countryCode);
+    if (flag) parts.push(flag);
+  }
+  return parts.join(" ");
 }
 
 // The argv-vector for one poll request. No shell, no environment, no secrets:
@@ -93,7 +288,8 @@ function buildFetchCommand(config) {
   var timeout = DEFAULT_REQUEST_TIMEOUT_SECONDS;
   if (config && isFinite(config.requestTimeoutSeconds)) {
     var t = Math.round(Number(config.requestTimeoutSeconds));
-    if (t >= 3 && t <= 30) timeout = t;
+    if (t >= MIN_REQUEST_TIMEOUT_SECONDS
+      && t <= MAX_REQUEST_TIMEOUT_SECONDS) timeout = t;
   }
   return [
     "curl", "-sS",
@@ -322,30 +518,46 @@ function statusLine(view) {
 }
 
 // Calm bar tooltip. English (user-facing texts are English; the plugin is
-// published worldwide).
-function tooltipText(view, pollIntervalSeconds) {
-  var interval = isFinite(pollIntervalSeconds) ? Math.round(Number(pollIntervalSeconds)) : DEFAULT_POLL_INTERVAL_SECONDS;
+// published worldwide). `intervalOrCfg` is either the poll interval in
+// seconds (legacy) or the parsed config object; showCountry/showFlag gate
+// the country name / flag emoji when a config object is passed.
+function tooltipText(view, intervalOrCfg) {
+  var cfg = null;
+  var interval = DEFAULT_POLL_INTERVAL_SECONDS;
+  if (intervalOrCfg !== null && typeof intervalOrCfg === "object") {
+    cfg = intervalOrCfg;
+    if (isFinite(cfg.pollIntervalSeconds)) {
+      interval = Math.round(Number(cfg.pollIntervalSeconds));
+    }
+  } else if (isFinite(Number(intervalOrCfg))) {
+    interval = Math.round(Number(intervalOrCfg));
+  }
   if (isLoading(view)) return "MyIP \u2014 checking your public IP\u2026";
   if (isOffline(view)) {
     var tip = "MyIP \u2014 offline \u00b7 no public IP reachable \u00b7 retrying every " + interval + " s";
     if (view.data) {
       var known = view.data.ip;
-      if (view.data.countryCode) known += " (" + view.data.countryCode + ")";
+      var showCountryCfg = !cfg || cfg.showCountry !== false;
+      if (showCountryCfg && view.data.countryCode) {
+        known += " (" + view.data.countryCode + ")";
+      }
       tip += " \u00b7 last known " + known;
     }
+    if (view.at) tip += " \u00b7 last check " + formatTime(view.at);
     return tip;
   }
   if (isOk(view) && view.data) {
     var parts = [view.data.ip];
-    if (view.data.country) {
-      var countryPart = view.data.country;
-      var flag = flagEmoji(view.data.countryCode);
-      if (flag) countryPart += " " + flag;
-      parts.push(countryPart);
-    }
+    var geo = countryFragment(view.data, cfg);
+    if (geo) parts.push(geo);
     if (view.data.isp) parts.push(view.data.isp);
     var text = "MyIP \u2014 " + parts.join(" \u00b7 ");
-    if (view.message) text += " \u00b7 last check failed (" + view.message + ")";
+    if (view.message) {
+      text += " \u00b7 last check failed at " + formatTime(view.at)
+        + " (" + view.message + ")";
+    } else if (view.at) {
+      text += " \u00b7 last check " + formatTime(view.at);
+    }
     return text;
   }
   return "MyIP \u2014 checking your public IP\u2026";
@@ -542,19 +754,17 @@ function trackObservation(state, obs) {
 }
 
 // Human strings for one IP-change event (used by the widget to send one
-// Omarchy notification per event).
-function changeNotificationParts(event) {
+// Omarchy notification per event). `cfg` (optional) gates the country name /
+// flag emoji with showCountry/showFlag; alertOnChange is enforced by the
+// caller before the event is even queued.
+function changeNotificationParts(event, cfg) {
   if (!event || event.kind !== "changed") return {};
   var fromIp = (event.from && event.from.ip) || "";
   var toIp = (event.to && event.to.ip) || "";
   if (!fromIp || !toIp) return {};
   var body = "IP changed: " + fromIp + " \u2192 " + toIp;
-  if (event.to.countryCode) {
-    var flag = flagEmoji(event.to.countryCode);
-    var geo = event.to.country ? event.to.country : event.to.countryCode;
-    if (flag) body += " (" + geo + " " + flag + ")";
-    else body += " (" + geo + ")";
-  }
+  var geo = countryFragment(event.to, cfg);
+  if (geo) body += " (" + geo + ")";
   return {
     summary: "MyIP \u2014 IP changed",
     body: body,
@@ -612,10 +822,25 @@ if (typeof module !== "undefined") {
     QUERY_FIELDS: QUERY_FIELDS,
     HTTP_MARKER: HTTP_MARKER,
     DEFAULT_POLL_INTERVAL_SECONDS: DEFAULT_POLL_INTERVAL_SECONDS,
+    MIN_POLL_INTERVAL_SECONDS: MIN_POLL_INTERVAL_SECONDS,
+    MAX_POLL_INTERVAL_SECONDS: MAX_POLL_INTERVAL_SECONDS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS: DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    MIN_REQUEST_TIMEOUT_SECONDS: MIN_REQUEST_TIMEOUT_SECONDS,
+    MAX_REQUEST_TIMEOUT_SECONDS: MAX_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_ALERT_ON_CHANGE: DEFAULT_ALERT_ON_CHANGE,
+    DEFAULT_SHOW_COUNTRY: DEFAULT_SHOW_COUNTRY,
+    DEFAULT_SHOW_FLAG: DEFAULT_SHOW_FLAG,
     MAX_RESPONSE_BYTES: MAX_RESPONSE_BYTES,
     OFFLINE_AFTER_CONSECUTIVE_FAILURES: OFFLINE_AFTER_CONSECUTIVE_FAILURES,
     defaults: defaults,
+    parseConfig: parseConfig,
+    configKindText: configKindText,
+    configProblemText: configProblemText,
+    resetConfigCommandArgs: resetConfigCommandArgs,
+    templateConfigText: templateConfigText,
+    copyCommandArgs: copyCommandArgs,
+    barFlag: barFlag,
+    countryFragment: countryFragment,
     buildFetchCommand: buildFetchCommand,
     initialView: initialView,
     isLoading: isLoading,
