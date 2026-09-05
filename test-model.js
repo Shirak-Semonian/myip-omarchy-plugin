@@ -130,7 +130,7 @@ eq(afterTick.status, "ok", "fetchStart leaves an ok state alone (no flicker)")
 eq(afterTick, beforeTick, "fetchStart is a no-op for ok")
 
 // =========================================================================
-// MI-2: address-change detection, history + notifications
+// Address-change detection, history + notifications
 // =========================================================================
 
 // --- tracker basics -------------------------------------------------------
@@ -263,7 +263,7 @@ has(wArgs.join(" "), ".tmp.$$", "write helper is atomic (tmp + mv)")
 has(wArgs.join(" "), "mv -f", "write helper renames into place")
 
 // =========================================================================
-// MI-3: config parsing, guards, recovery and display preferences
+// Config parsing, guards, recovery and display preferences
 // =========================================================================
 
 // --- config defaults + interval guards ------------------------------------
@@ -328,7 +328,7 @@ eq(M.parseConfig(JSON.stringify({ requestTimeoutSeconds: 99 })).config.requestTi
 eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: "fast" })).ok, false, "non-numeric interval is a field error")
 eq(M.parseConfig(JSON.stringify({ pollIntervalSeconds: true })).ok, false, "boolean interval is a field error")
 
-// --- parseConfig: invalid JSON / wrong shape (DS-5: no content leak) -------
+// --- parseConfig: invalid JSON / wrong shape (no content leak) -------------
 const secret = "sk-myip-super-secret-value-123456"
 const garbage = "not json " + secret + " {"
 const badParse = M.parseConfig(garbage)

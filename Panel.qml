@@ -13,16 +13,16 @@ import "Model.js" as Model
 // state is owned by the bar widget (hostWidget.view), so the bar label and
 // this panel never disagree. When the widget is offline the panel stays
 // calm: it marks the state and keeps showing the last known address. When
-// the optional config file is broken (DS-5) the panel shows a calm
+// the optional config file is broken, the panel shows a calm
 // "config file needs attention" card with reset/open actions and the widget
 // keeps running on defaults; config contents are never displayed.
 //
-// MI-2 additions: the panel mirrors the bar's persisted address-change
+// The panel mirrors the bar's persisted address-change
 // tracker, so it can show the address family, the moment of the last change
 // and the short history of previous public IPs (with a calm empty state
 // before the first change ever happens).
 //
-// MI-3: showCountry/showFlag from the config gate the country name and the
+// showCountry/showFlag from the config gate the country name and the
 // flag emoji in every display string; alertOnChange gates the change popup
 // (honored by the bar widget, mirrored here as a status row).
 Panel {
@@ -50,13 +50,13 @@ Panel {
   readonly property bool hasOk: Model.isOk(root.view)
   readonly property bool hasData: Model.hasData(root.view)
 
-  // Display preferences (MI-3): showCountry/showFlag are honored in every
+  // Display preferences: showCountry/showFlag are honored in every
   // user-facing string; alertOnChange is honored in the bar widget.
   readonly property bool showCountry: root.cfg.showCountry !== false
   readonly property bool showFlag: root.cfg.showFlag !== false
   readonly property bool alertOnChange: root.cfg.alertOnChange !== false
 
-  // Config attention (DS-5): mirror the bar's config problem (static text,
+  // Config attention: mirror the bar's config problem (static text,
   // never file content) and offer reset/open actions.
   readonly property string configError: hostWidget && hostWidget.configError
     ? hostWidget.configError : ""
@@ -90,7 +90,7 @@ Panel {
     ? (root.view.data.as || "—") : "—"
   readonly property string checkedText: root.view.at ? Model.formatTime(root.view.at) : "—"
 
-  // MI-2: address-change tracker (mirrored from the bar widget root). The
+  // Address-change tracker (mirrored from the bar widget root). The
   // panel reads the same persisted tracker the bar feeds, so the history and
   // the last-change time can never disagree with the notifications.
   readonly property var tracker: hostWidget && hostWidget.tracker
@@ -209,7 +209,7 @@ Panel {
           }
         }
 
-        // ---- config file needs attention (DS-5) --------------------------
+        // ---- config file needs attention ---------------------------------
         // Calm, static problem text (never raw file content) + the two safe
         // repair actions. The widget keeps working on defaults meanwhile.
         Column {
@@ -409,7 +409,7 @@ Panel {
           }
         }
 
-        // ---- address history (MI-2) --------------------------------------
+        // ---- address history ---------------------------------------------
         PanelSeparator {
           foreground: root.foreground
           visible: root.hasData

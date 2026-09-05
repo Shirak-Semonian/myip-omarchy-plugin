@@ -7,7 +7,7 @@
 //     the bottom).
 //
 // ---------------------------------------------------------------------------
-// Public-IP API decision (MI-1, 2026-09-05, verified live from this machine)
+// Public-IP API decision (2026-09-05, verified live from this machine)
 // ---------------------------------------------------------------------------
 // Primary endpoint: ip-api.com — http://ip-api.com/json/?fields=...
 //
@@ -52,7 +52,7 @@ var QUERY_FIELDS = "status,message,country,countryCode,regionName,city,isp,org,a
 var HTTP_MARKER = "\n__MYIP_HTTP__";
 
 var DEFAULT_POLL_INTERVAL_SECONDS = 60;
-var MIN_POLL_INTERVAL_SECONDS = 30;   // DS-7 guard: never poll faster than this
+var MIN_POLL_INTERVAL_SECONDS = 30;   // never poll faster than this
 var MAX_POLL_INTERVAL_SECONDS = 3600; // sane upper bound (an hour is plenty)
 var DEFAULT_REQUEST_TIMEOUT_SECONDS = 8;
 var MIN_REQUEST_TIMEOUT_SECONDS = 3;
@@ -60,13 +60,13 @@ var MAX_REQUEST_TIMEOUT_SECONDS = 30;
 var MAX_RESPONSE_BYTES = 65536; // 64 KiB — curl --max-filesize + parser cap
 var OFFLINE_AFTER_CONSECUTIVE_FAILURES = 2;
 
-// MI-3: key-less display/behaviour preferences. Everything has a default and
+// Key-less display/behaviour preferences. Everything has a default and
 // the config file is optional, so an absent or empty config just works.
 var DEFAULT_ALERT_ON_CHANGE = true;
 var DEFAULT_SHOW_COUNTRY = true;
 var DEFAULT_SHOW_FLAG = true;
 
-// MI-2: public-IP change tracking. The widget keeps the last known address
+// Public-IP change tracking. The widget keeps the last known address
 // (plus a short history) in a tiny state file and notifies once per real
 // change. The first sighting is a silent baseline — a fresh install (or a
 // cleared state file) never rings.
@@ -99,7 +99,7 @@ function defaults() {
 }
 
 // ---------------------------------------------------------------------------
-// MI-3: config file (~/.config/myip/config.json)
+// Config file (~/.config/myip/config.json)
 // ---------------------------------------------------------------------------
 // The config is entirely optional and key-less:
 //   * a missing or empty file simply means "defaults";
@@ -108,14 +108,14 @@ function defaults() {
 //   * a *broken* file (invalid JSON / wrong shape / wrong field type) must
 //     never crash the widget and never surface raw file content: the panel
 //     shows a calm problem line plus a "reset to defaults" action
-//     (DS-5 lesson: no content/key leak in UI or errors).
+//     (no content/key leak in UI or errors).
 //
 // parseConfig returns
 //   { ok: true, config: {...} }
 // or
 //   { ok: false, kind: "empty"|"parse"|"shape"|"field", error, hint }
 // `error` is a fixed sentence and `hint` is a fixed suggestion; neither ever
-// contains the raw config text (DS-5: engine JSON error messages can quote
+// contains the raw config text (engine JSON error messages can quote
 // the offending content and are therefore never surfaced verbatim).
 
 function configKindText(kind) {
@@ -151,7 +151,7 @@ function parseConfig(raw) {
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    // Never surface the engine error (it can echo file content, DS-5).
+    // Never surface the engine error (it can echo file content).
     return { ok: false, kind: "parse", error: configKindText("parse"),
       hint: "Check the double quotes, commas and braces." };
   }
@@ -183,7 +183,7 @@ function parseConfig(raw) {
       MAX_REQUEST_TIMEOUT_SECONDS);
   }
   // Booleans are strict: a wrong type is a calm "field" problem the panel can
-  // offer to reset (like DeepSpend's notificationsEnabled). Numbers clamp.
+  // offer to reset. Numbers clamp.
   var boolKeys = ["alertOnChange", "showCountry", "showFlag"];
   for (var bi = 0; bi < boolKeys.length; bi++) {
     var key = boolKeys[bi];
@@ -243,7 +243,7 @@ function templateConfigText() {
 }
 
 // ---------------------------------------------------------------------------
-// Copy action (MI-3): fixed Omarchy clipboard IPC, never a shell command.
+// Copy action: fixed Omarchy clipboard IPC, never a shell command.
 // ---------------------------------------------------------------------------
 // The public IP travels as a *positional argument* to Omarchy's own
 // clipboard-paste tool (`--copy-only`), which pipes it into wl-copy. There is
@@ -564,7 +564,7 @@ function tooltipText(view, intervalOrCfg) {
 }
 
 // ---------------------------------------------------------------------------
-// MI-2: address-change tracking, history + notifications (pure logic)
+// Address-change tracking, history + notifications (pure logic)
 // ---------------------------------------------------------------------------
 //
 // Tracker state (persisted as JSON under $XDG_STATE_HOME/myip/state.json):

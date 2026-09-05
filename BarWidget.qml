@@ -12,15 +12,15 @@ import "Model.js" as Model
 // tooltip (status + country + ISP + last check). Left/right click toggles the
 // details panel; middle click forces an immediate check.
 //
-// MI-3 (config): an optional, key-less `~/.config/myip/config.json` tunes the
+// Config: an optional, key-less `~/.config/myip/config.json` tunes the
 // poll interval (min 30 s), timeout, change alerts and country/flag display.
 // Missing/empty file = defaults; a valid file is applied live; a broken file
-// (DS-5) never crashes the widget and never leaks content — the widget keeps
+// never crashes the widget and never leaks content — the widget keeps
 // running with defaults while the panel offers a calm "reset to defaults".
 // Copying always uses Omarchy's fixed clipboard IPC (no copyCommand config,
 // no shell interpolation).
 //
-// MI-2 (address-change detection): every successful check feeds a tiny
+// Address-change detection: every successful check feeds a tiny
 // persistent tracker (state file + short history). The first sighting after
 // a state reset is a silent baseline — a fresh install or a shell restart
 // with an unchanged address never rings. When the public IP really changes,
@@ -28,7 +28,7 @@ import "Model.js" as Model
 // ("IP changed: OLD → NEW", country included when known), deduped across
 // twin bar instances with a flock gate.
 //
-// Quiet by design (DS-7 lesson):
+// Quiet by design:
 //   * one heartbeat Timer + one reusable fetch Process — at most one curl
 //     request in flight, at most one per poll interval (default 60 s);
 //     the extra Processes only run when an address change happens (state
@@ -92,7 +92,7 @@ BarWidget {
   readonly property bool showFlag: !root.config
     || root.config.showFlag !== false
 
-  // ---- MI-2: address-change tracker + notifications ----------------------
+  // ---- Address-change tracker + notifications ----------------------------
   // The tracker (last known address + short history) lives in a tiny JSON
   // state file so a restart can never re-announce an unchanged address and
   // the panel can show the history. Loaded once at startup; observations
@@ -195,7 +195,7 @@ BarWidget {
     if (target && typeof target.copyIp === "function") target.copyIp()
   }
 
-  // ---- MI-3: config file ------------------------------------------------
+  // ---- Config file ------------------------------------------------------
   // Apply one raw config file read. A missing/empty file = defaults; a
   // broken file keeps the defaults and records a calm attention state; a
   // valid file replaces root.config. Identical reloads are ignored so a
@@ -206,7 +206,7 @@ BarWidget {
     root._configSeen = true
     var parsed = Model.parseConfig(raw)
     if (!parsed.ok) {
-      // Broken file (DS-5): run with defaults, keep the widget calm and let
+      // Broken file: run with defaults, keep the widget calm and let
       // the panel offer "reset to defaults". Raw content is never logged.
       root.configErrorKind = parsed.kind
       root._configProblem = parsed
@@ -302,7 +302,7 @@ BarWidget {
     if (result.ok) root.observeAddress(result.data, at)
   }
 
-  // ---- MI-2: address-change tracking -------------------------------------
+  // ---- Address-change tracking -------------------------------------------
   // Feeds one fresh observation into the pure Model reducer, persists the
   // tracker when it moved (baseline or change) and queues a notification for
   // every real change event. The reducer emits at most one event per

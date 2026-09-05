@@ -28,7 +28,7 @@
   <!-- Calm horizontal parallel so the globe reads as a sphere -->
   <ellipse cx="64" cy="63" rx="35" ry="10" fill="none" stroke="#7E8FAA" stroke-width="4"/>
 
-  <!-- Live-location dot: the "you are here" pulse in the Nvag Pulse green -->
+  <!-- Live-location dot: the "you are here" pulse-green accent -->
   <circle cx="82" cy="49" r="12.5" fill="none" stroke="#5DC794" stroke-opacity="0.4" stroke-width="3"/>
   <circle cx="82" cy="49" r="8" fill="#5DC794"/>
   <circle cx="80" cy="47" r="2.4" fill="#C9F0DC"/>
