@@ -17,6 +17,12 @@ internet with, straight from the bar.
 - **Live public IPv4 in the bar**: the widget shows your current public IP with
   its country flag next to a custom MyIP icon, refreshed quietly every 60
   seconds. The widget name stays visible so the bar always reads clearly.
+- **Masked by default**: the bar shows only the leading label of the address
+  (`198.**.***.**`) so your public IP is not readable over your shoulder, in a
+  screenshot, or on a stream. Hover the widget — or open its panel — and the
+  full address appears; move away or close the panel and it hides itself
+  again. The masked form is exactly as wide as the real one, so nothing in
+  the bar shifts when it reveals. Set `maskAddress: false` to opt out.
 - **Calm states**: a short *checking…* moment on first start, then either the
   address or a quiet *offline* state (dimmed icon, informative tooltip). A
   single failed check never hides the last known address; the widget only
@@ -103,7 +109,8 @@ MyIP is fully optional and **key-less**: an absent or empty config file means
   "requestTimeoutSeconds": 8,
   "alertOnChange": true,
   "showCountry": true,
-  "showFlag": true
+  "showFlag": true,
+  "maskAddress": true
 }
 ```
 
@@ -114,6 +121,7 @@ MyIP is fully optional and **key-less**: an absent or empty config file means
 | `alertOnChange`         | `true`  | Show the IP-change popup when your public address changes        |
 | `showCountry`           | `true`  | Show the country name / location in the panel and tooltips       |
 | `showFlag`              | `true`  | Show the flag emoji in the bar, panel and notifications          |
+| `maskAddress`           | `true`  | Mask the address in the bar until hover / open panel             |
 
 Unknown keys are ignored, so a future version can add settings without
 breaking older files. The file is watched live: save an edit and the widget
@@ -129,6 +137,27 @@ in the UI or the journal — only fixed, human-readable problem sentences.
 shell interpolation of user input. The Copy action always calls Omarchy's own
 clipboard IPC (`omarchy-clipboard-paste-text --copy-only`) with the address as
 a plain positional argument.
+
+## Why the address is masked
+
+Your public IP is not a secret, but it is not something that benefits from
+sitting permanently on screen either. It is a stable identifier: it geolocates
+you to your city and ISP, it links your desktop to any account or log that has
+seen the same address, and it is the one piece of information an attacker
+needs to aim traffic at your connection.
+
+A status bar is the worst place to leave it. Bars are always visible, so the
+address ends up in every screenshot, every screen share, every stream and
+every photo of a desk — usually without anyone noticing it was there. Bug
+reports are the common case: people screenshot their whole bar to show an
+unrelated widget.
+
+Masking removes that whole class of accidental disclosure without costing the
+feature. The leading label stays visible, so the widget still answers the
+questions it exists for at a glance — did my address change, did my VPN drop
+me back onto my ISP's range — while the identifying part is one hover away
+when you actually want it. Because the reveal is bound to hover and panel
+state rather than a toggle, it cannot be left on by accident.
 
 ## Privacy and the address service
 

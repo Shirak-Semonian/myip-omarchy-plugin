@@ -146,7 +146,13 @@ BarWidget {
   readonly property bool offline: Model.isOffline(root.view)
   readonly property bool dimmed: Model.isDimmed(root.view)
 
-  readonly property string valueText: Model.barValueText(root.view)
+  // The address is masked in the bar (41.**.***.**) until it is deliberately
+  // revealed: while the pointer is on the widget, or while its panel is open.
+  // Moving away or closing the panel hides it again on its own -- there is no
+  // sticky "revealed" state to forget about.
+  readonly property bool addressRevealed: button.tooltipHovered || root.opened
+  readonly property string valueText: Model.barDisplayText(root.view,
+    root.config, root.addressRevealed)
   // Flag only when the user enables it AND the state is fresh enough.
   readonly property string flagText: Model.barFlag(root.view, root.config)
   readonly property string widgetTooltip: {
@@ -508,7 +514,7 @@ BarWidget {
   // Reserve the natural width of the composed label so the bar slot matches
   // the visible content (icon + name + value + optional flag).
   implicitWidth: iconImage.width + Style.space(6) + nameText.implicitWidth
-    + Style.space(6) + valueText.implicitWidth
+    + Style.space(6) + Math.max(valueMetrics.width, valueText.implicitWidth)
     + (flagTextItem.visible ? Style.space(5) + flagTextItem.implicitWidth : 0)
     + Style.space(16)
   implicitHeight: root.barSize
@@ -734,8 +740,20 @@ BarWidget {
       verticalAlignment: Text.AlignVCenter
     }
 
+    // Width is reserved for the *unmasked* address so revealing it on hover
+    // can never shift this widget or its neighbours. The masked form has the
+    // same character count, but '*' and digits are not the same width in a
+    // proportional bar font.
+    TextMetrics {
+      id: valueMetrics
+      font: valueText.font
+      text: Model.barValueText(root.view)
+    }
+
     Text {
       id: valueText
+      width: Math.max(valueMetrics.width, implicitWidth)
+      horizontalAlignment: Text.AlignLeft
       anchors.left: nameText.right
       anchors.leftMargin: Style.space(6)
       anchors.verticalCenter: parent.verticalCenter
