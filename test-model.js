@@ -434,4 +434,31 @@ has(M.tooltipText({ status: "offline", at: 1, data: null, message: "rate limited
 has(M.parseFetchResult(0, "{}" + M.HTTP_MARKER + "429").message, "rate limited", "http 429 text")
 has(M.parseFetchResult(0, "{}" + M.HTTP_MARKER + "500").message, "HTTP 500", "http 500 text")
 
+// --- address masking -----------------------------------------------------
+eq(M.DEFAULT_MASK_ADDRESS, true, "masking is the privacy-by-default")
+eq(M.defaults().maskAddress, true, "defaults carry maskAddress")
+eq(M.maskIp("198.51.100.42"), "198.**.***.**", "ipv4 keeps only the first octet")
+eq(M.maskIp("8.8.8.8"), "8.*.*.*", "short ipv4 octets")
+eq(M.maskIp("203.0.113.7"), "203.*.***.*", "mixed-width ipv4 octets")
+eq(M.maskIp("2001:db8::1"), "2001:***::*", "ipv6 keeps only the first group")
+eq(M.maskIp(""), "", "empty address masks to empty")
+eq(M.maskIp(null), "", "null address masks to empty")
+eq(M.maskIp("localhost"), "localhost", "no separator -> returned unchanged")
+eq(M.maskIp("198.51.100.42").length, "198.51.100.42".length, "masked width matches the real address")
+
+const maskedView = { status: "ok", data: { ip: "198.51.100.42" }, at: 1 }
+eq(M.barDisplayText(maskedView, M.defaults(), false), "198.**.***.**", "bar masks by default")
+eq(M.barDisplayText(maskedView, M.defaults(), true), "198.51.100.42", "revealed shows the real address")
+eq(M.barDisplayText(maskedView, null, false), "198.**.***.**", "missing config still masks")
+eq(M.barDisplayText(maskedView, { maskAddress: false }, false), "198.51.100.42", "opt-out shows the real address")
+eq(M.barDisplayText({ status: "offline" }, M.defaults(), false), "offline", "offline state is never masked")
+eq(M.barDisplayText(M.initialView(), M.defaults(), false), "\u2026", "loading state is never masked")
+// barValueText keeps its old meaning so existing callers are unaffected.
+eq(M.barValueText(maskedView), "198.51.100.42", "barValueText still returns the raw address")
+
+// maskAddress is parsed and type-checked like the other booleans
+eq(M.parseConfig('{"maskAddress": false}').config.maskAddress, false, "maskAddress parsed")
+eq(M.parseConfig('{"maskAddress": "no"}').ok, false, "non-boolean maskAddress rejected")
+has(M.templateConfigText(), '"maskAddress"', "reset template documents maskAddress")
+
 console.log("Model.js: all checks passed")

@@ -74,6 +74,9 @@ var POLL_WATCHDOG_FLOOR_SECONDS = 10;
 var DEFAULT_ALERT_ON_CHANGE = true;
 var DEFAULT_SHOW_COUNTRY = true;
 var DEFAULT_SHOW_FLAG = true;
+// Privacy default: the bar shows only the leading label of the address
+// (41.**.***.***) until the widget is hovered or its panel is open.
+var DEFAULT_MASK_ADDRESS = true;
 
 // Public-IP change tracking. The widget keeps the last known address
 // (plus a short history) in a tiny state file and notifies once per real
@@ -103,7 +106,8 @@ function defaults() {
     requestTimeoutSeconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
     alertOnChange: DEFAULT_ALERT_ON_CHANGE,
     showCountry: DEFAULT_SHOW_COUNTRY,
-    showFlag: DEFAULT_SHOW_FLAG
+    showFlag: DEFAULT_SHOW_FLAG,
+    maskAddress: DEFAULT_MASK_ADDRESS
   };
 }
 
@@ -207,7 +211,7 @@ function parseConfig(raw) {
   }
   // Booleans are strict: a wrong type is a calm "field" problem the panel can
   // offer to reset. Numbers clamp.
-  var boolKeys = ["alertOnChange", "showCountry", "showFlag"];
+  var boolKeys = ["alertOnChange", "showCountry", "showFlag", "maskAddress"];
   for (var bi = 0; bi < boolKeys.length; bi++) {
     var key = boolKeys[bi];
     if (parsed[key] === undefined) continue;
@@ -261,7 +265,8 @@ function templateConfigText() {
     + "  \"requestTimeoutSeconds\": " + d.requestTimeoutSeconds + ",\n"
     + "  \"alertOnChange\": " + d.alertOnChange + ",\n"
     + "  \"showCountry\": " + d.showCountry + ",\n"
-    + "  \"showFlag\": " + d.showFlag + "\n"
+    + "  \"showFlag\": " + d.showFlag + ",\n"
+    + "  \"maskAddress\": " + d.maskAddress + "\n"
     + "}\n";
 }
 
@@ -506,6 +511,47 @@ function barValueText(view) {
 }
 
 // Human status label for the panel ("Online" / "Checking…" / "Offline").
+// Repeated mask characters. A loop rather than String.repeat so this module
+// keeps to the same conservative JS subset as the rest of the file (it is
+// shared verbatim with the QML engine).
+function maskChars(count) {
+  var out = "";
+  for (var i = 0; i < count; i++) out += "*";
+  return out;
+}
+
+// Hide everything but the leading label of an address:
+// "198.51.100.42" -> "198.**.***.**", "2001:db8::1" -> "2001:***::*".
+// One '*' per hidden character, so the masked string is exactly as wide as
+// the real one and revealing it can never shift the bar layout. The leading
+// label survives because it is what makes the widget useful at a glance: you
+// can still see that the address changed, or that a VPN moved you off your
+// ISP's range, without the whole address sitting on screen.
+function maskIp(ip) {
+  var text = String(ip == null ? "" : ip);
+  if (text === "") return "";
+  var sep = text.indexOf(":") >= 0 ? ":" : ".";
+  var parts = text.split(sep);
+  if (parts.length < 2) return text;
+  var out = [parts[0]];
+  for (var i = 1; i < parts.length; i++) out.push(maskChars(parts[i].length));
+  return out.join(sep);
+}
+
+// What the bar label actually paints. Identical to barValueText() unless
+// masking is on and the address is not currently revealed (hover, or an open
+// panel). The non-address states are never masked: there is nothing to hide
+// in them, and blanking them would cost the at-a-glance status the widget
+// exists for.
+function barDisplayText(view, cfg, revealed) {
+  var text = barValueText(view);
+  if (revealed === true) return text;
+  if (cfg && cfg.maskAddress === false) return text;
+  if (!isOk(view) || !view.data || !view.data.ip) return text;
+  if (text !== view.data.ip) return text;
+  return maskIp(text);
+}
+
 function statusLabel(view) {
   if (isLoading(view)) return "Checking\u2026";
   if (isOffline(view)) return "Offline";
@@ -853,6 +899,7 @@ if (typeof module !== "undefined") {
     DEFAULT_ALERT_ON_CHANGE: DEFAULT_ALERT_ON_CHANGE,
     DEFAULT_SHOW_COUNTRY: DEFAULT_SHOW_COUNTRY,
     DEFAULT_SHOW_FLAG: DEFAULT_SHOW_FLAG,
+    DEFAULT_MASK_ADDRESS: DEFAULT_MASK_ADDRESS,
     MAX_RESPONSE_BYTES: MAX_RESPONSE_BYTES,
     OFFLINE_AFTER_CONSECUTIVE_FAILURES: OFFLINE_AFTER_CONSECUTIVE_FAILURES,
     POLL_WATCHDOG_GRACE_SECONDS: POLL_WATCHDOG_GRACE_SECONDS,
@@ -881,6 +928,8 @@ if (typeof module !== "undefined") {
     reduce: reduce,
     flagEmoji: flagEmoji,
     barValueText: barValueText,
+    maskIp: maskIp,
+    barDisplayText: barDisplayText,
     statusLabel: statusLabel,
     formatTime: formatTime,
     locationLine: locationLine,
